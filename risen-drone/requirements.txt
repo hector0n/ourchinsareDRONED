@@ -15,3 +15,8 @@ redis==4.5.4
 requests==2.28.2
 yarg==0.1.9
 yarl==1.8.2
+
+pwd
+ls -la
+find . -maxdepth 3 -iname "requirements*.txt" -print
+python -c 'import pathlib; print(pathlib.Path("requirements.txt").resolve())'

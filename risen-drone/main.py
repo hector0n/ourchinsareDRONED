@@ -1,0 +1,2193 @@
+### IMPORTS ###
+import discord
+import os
+import random
+import asyncio
+import requests 
+import datetime
+#from datetime import date
+from discord.ext import commands
+from difflib import SequenceMatcher
+
+from cogs.rig_cog import RigCog
+from cogs.minigames_cog import MinigamesCog
+from cogs.personal_cog import PersonalCog
+from cogs.roles_cog import RolesCog
+from cogs.misc_cog import MiscCog
+from cogs.event_cog import EventCog
+from cogs.admin_cog import AdminCog
+from globals import *
+from roles import *
+from ladders import *
+from fighting import *
+from rated import *
+from rigs import *
+from database import *
+from utility import *
+from quiz import * 
+### INITIAL SETUP ### 
+
+# This allows us to know if user has updated their presence
+# Mosty for the gun role nick change prevention
+
+intents = discord.Intents.default()
+intents.members = True
+intents.message_content = True
+client = commands.Bot(command_prefix='bd ', intents=intents)
+
+# prepare to get a list of words for the hangman game
+# nltk.download('words')
+# word_list = words.words()
+
+with open('blacklist.txt') as input_file:
+    client.blacklist = [line.strip() for line in input_file]
+
+with open('hangman.txt') as input_file:
+    client.word_list = [line.strip() for line in input_file]
+
+
+#post tips
+async def POST_TIPS(channel,key):
+    entries = list_entries(key)
+    combined_string = ""
+    for i in range(len(entries)):
+        await SEND(channel, "-----\n" + entries[i].decode("utf-8") + "\n-----")
+        await asyncio.sleep(3)
+ 
+#print questions 
+async def PRINT_QUESTIONS(channel):
+    entries = list_entries('quiz')
+    combined_string = ""
+    for i in range(len(entries)):
+        entry = entries[i].decode("utf-8")
+        split = entry.split('|')
+        new_string = combined_string + str(i) + ") " + split[0] + "\n"
+        if len(new_string) > 2000:
+            await SEND(channel,combined_string)
+            combined_string = str(i) + ") " + split[0] + "\n"
+        else:
+            combined_string = new_string
+    await SEND(channel,combined_string)
+
+#simpler admin check
+async def ADMIN_CHECK(usr, ch):
+    if not EXTRA_ROLES['admin'] in usr.roles:
+        return await SEND(ch, "You are not allowed to use this command.")
+
+### PUBLIC (ON EVENT) FUNCTIONS ###
+    
+#drone start up, prepare roles here
+@client.event
+async def on_ready():
+    
+    print('We have logged in as {0.user}'.format(client))
+    game = discord.Game("/help")
+    await client.change_presence(activity=game)
+
+    #get the guild
+    #this is a one-off, so we do not worry about rate limits
+    SERVER_DATA['server'] = client.get_guild(SERVER_DATA['server'])
+    
+    #get the channels
+    for i, v in CHANNELS.items():
+        CHANNELS[i] = GET_CHANNEL(client,v)
+    
+    # RIG_DATA['rigTracker'] = await GET_MSG(CHANNELS["drone-masters"],RIG_DATA['rigTracker'])
+
+    #prepare the roles
+ 
+    PrepareRoles(SERVER_DATA['server'].roles)
+    # PrepareSecretRoles(FUN_ROLES.keys()) #Keeping this ready.
+            
+    #fetch questions for the quiz
+    await FetchQuestions()
+
+    #prepare emojis reactions
+    for i, v in EMOJIS_TO_REACT.items():
+        EMOJIS_TO_REACT[i] = GET_EMOJI(client,v)
+    
+    restarts = 0
+    ping = ""
+
+    if str(os.environ['RAILWAY_GIT_COMMIT_MESSAGE']).startswith("Merge branch"):
+        restarts = int(get_value("restarts")) + 2
+    else:
+        restarts = int(get_value("restarts")) + 1
+
+    if str(os.environ['RAILWAY_GIT_AUTHOR']) in GIT_COMMITTERS.keys():
+        ping = f"<@{GIT_COMMITTERS[str(os.environ['RAILWAY_GIT_AUTHOR'])]}>"
+    else:
+        ping = str(os.environ['RAILWAY_GIT_AUTHOR'])
+
+    #send ready to the test channel
+    await SEND(CHANNELS["drone-masters"], f"The last edited code is now effective for the **{restarts}th** time.\nSummary: `{os.environ['RAILWAY_GIT_COMMIT_MESSAGE']}`\nAuthor: {ping}")
+
+    set_entry("restarts", str(restarts))
+
+    try:
+        await client.add_cog(RigCog(client))
+        await client.add_cog(MinigamesCog(client))
+        await client.add_cog(PersonalCog(client))
+        await client.add_cog(RolesCog(client))
+        await client.add_cog(MiscCog(client))
+        await client.add_cog(EventCog(client))
+        await client.add_cog(AdminCog(client))
+    except Exception:
+        pass
+
+    try:
+        await client.tree.sync()
+    except Exception:
+        pass
+
+#member update, prevent changing gun nick to anything other than the gun name
+@client.event
+async def on_member_update(before, after):
+    
+    #nick has not changed -- user has role gun  and/or new name is a gun name
+    if before.nick == after.nick or (MORPHABLE_ROLES["Gun"][0] in before.roles and after.nick in WORST_GUNS):
+        return
+    
+    #if name ends with :] gives the role
+    if not str(after.id) in list_decoded_entries(":]") and str(after.nick).endswith(':]'):
+        await add_entry_with_check(":]", after)
+        await asyncio.sleep(1)
+        await SEND(CHANNELS['bot-commands'], f"What have you done {after.mention}? There is no escape from :].")
+    
+
+    #name not stolen but is gun 
+    if not before in NickDictionary and MORPHABLE_ROLES['Gun'][0] in before.roles:
+        await EDIT_NICK(after, random.choice(WORST_GUNS))
+        return
+    #name stolen and is NOT gun
+    elif before in NickDictionary and after.nick != NickDictionary[before] and MORPHABLE_ROLES['Gun'][0] not in before.roles:
+        await EDIT_NICK(after, NickDictionary[before])
+        return
+
+    # #for thief rig
+    # if before in NickDictionary and after.nick != NickDictionary[before]:
+    #   await EDIT_NICK(after, NickDictionary[before])
+    #   return
+ 
+    # #is user a gun?
+    # if not MORPHABLE_ROLES["Gun"][0] in before.roles: 
+    #     return
+    
+    # #ignore if user nick after change is a gun name
+    # if after.nick in WORST_GUNS and MORPHABLE_ROLES['Gun'][0] in before.roles:
+    #     return
+
+    # if MORPHABLE_ROLES['Gun'][0] in before.roles:
+    #     await EDIT_NICK(after, random.choice(WORST_GUNS))
+    return
+
+#on new member join
+@client.event
+async def on_member_join(member):  
+    NEW_MEMBERS.append(member)
+
+#saves last deleted message for necromancer rig to show
+@client.event
+async def on_message_delete(message):
+    RIG_DATA['ghostMsg'] = "*" + str(message.author.name) + "'s last words lie here...*"
+
+
+@client.event
+async def on_reaction_add(reaction, user):
+    # await SplicerRig(reaction,user)
+    if (str(reaction.emoji) == "<:csSleazelApproves:791393163343560715>" or str(reaction.emoji) == "<:csSleazelNotApproved:1038172235170578532>") and user.id != 481893862864846861 and user.id != 827952429290618943:
+        await reaction.remove(user)
+        # removing this as sometimes it tries to send it in the wrong channel
+        #if NOT_SLEAZEL[0] == False:
+        #    NOT_SLEAZEL[0] = True
+        #    if reaction.message.channel.id != 1001034407966150746:
+        #        await DRONEPRINT(f'Psst. It was {user.name}. They were impersonating Sleazel!')
+        #        await SEND(reaction.message.channel, f"You are not Sleazel. Drop the act.")
+        #    await asyncio.sleep(600)
+        #    NOT_SLEAZEL[0] = False
+        return
+
+#no longer needed
+#@client.event
+#async def on_message_edit(before, after):
+#    msg = after.content
+#    usr = after.author
+#    ch = after.channel
+
+#    if ch.id in [1154751339872653312, 845454640103424032] and (not after.attachments and 'http' not in msg):
+#       for role in usr.roles:
+#            if role.name in FULL_IMMUNITY_ROLES:
+#                return
+#
+#        await DELETE(after)
+
+# @client.event
+# async def on_interaction(interaction):
+#     if isinstance(interaction, discord.Interaction):
+#         if interaction.type == discord.InteractionType.component:
+#             custom_id = interaction.data['custom_id']
+#             user = interaction.user
+
+#             if custom_id.startswith('throw'):
+#                 custom_id = custom_id.replace('throw', '')
+#                 view = BUTTONS['view']
+#                 await view.process_click(interaction, custom_id, user)
+
+@client.event
+async def on_guild_join(guild):
+    if guild.id not in ALLOWED_GUILDS:
+        await guild.leave()
+        await DRONEPRINT(f"Left unauthorized Server (Join Trigger): {guild.name} ({guild.id}).")
+
+#main function on each message being intercepted
+@client.event
+async def on_message(message): 
+    if message.guild is None:
+        return
+
+    if message.guild.id not in ALLOWED_GUILDS:
+        await message.guild.leave()
+        await DRONEPRINT(f"Left unauthorized Server (Message Trigger): {message.guild.name} ({message.guild.id}).")
+        return
+
+    if message.channel.id == 1538275973848502455:
+        return
+    
+    msg = message.content
+    ## lowercase the message for some commands to use
+    lmsg = msg.lower()
+    usr = message.author
+    ch = message.channel 
+    buttons_chance = random.randint(1, 200)
+    today = datetime.date.today()
+    
+
+    if usr in EX_CLIMBERS:
+        await DELETE(message)
+        return
+    
+    if usr in NEW_MEMBERS and EXTRA_ROLES['climber'] in usr.roles and len(lmsg) > 1:
+        NEW_MEMBERS.remove(usr)
+        howToMorph = f"It seems you've sent your first message after verifying, good job! Not everyone makes it.\nYou can assign yourself Alignment roles by typing `/morph` in <#750060041289072771>.\nYou may also type `/help` to view every input I can respond to."
+
+        await SEND(ch, howToMorph)
+
+    #removed as per TD request (previously removed for showcase channel)
+    #if ch.id == 1154751339872653312 and (not message.attachments and 'http' not in msg):
+    #    for role in usr.roles:
+    #        if role.name in FULL_IMMUNITY_ROLES:
+    #            return
+    #
+    #    await DELETE(message)
+
+
+    #if (ch.id == 1154751339872653312 or ch.id == 1154748785415700582) and ("tenor.com" in lmsg or "giphy.com" in lmsg):
+    #    await DELETE(message)
+
+    ## user must not be a bot
+    ## but the bot will add reactions to the webhook (if any)
+    ## before returning 
+    if usr.bot:
+        if not usr.id == 827952429290618943:
+            for i, v in EMOJIS_TO_REACT.items():
+                if i in msg:
+                    await ADD_REACTION(message,v)
+                    return
+        return
+    
+    #better method to prevent errors
+    if not hasattr(usr,'roles'):
+        return
+
+    #if msg.lower() == "broken drone rest in peace" and FUN_ROLES["I was there"] not in usr.roles:
+        #await SEND(ch, "I will remember your sympathy.")
+       # await ADD_ROLES(usr, FUN_ROLES["I was there"])
+
+    #for bd profile
+    if usr.id not in MSG_SENT:
+        MSG_SENT[usr.id] = 1
+    else:
+        MSG_SENT[usr.id] = MSG_SENT[usr.id] + 1
+    
+    if today.day == 1 and today.month == 4:
+        if MORPHABLE_ROLES["Joker"][0] not in usr.roles:
+            await ADD_ROLES(usr, MORPHABLE_ROLES['Joker'][0])
+            await asyncio.sleep(1)
+
+            role_list = []
+            for role in usr.roles:
+                if role.name in MORPHABLE_ROLES and role.name != 'Joker':
+                    role_list.append(role)
+            await REMOVE_ROLES(usr, role_list)
+
+        # if not str(usr.id) in list_decoded_entries("Peppa Pig"):
+        #     await add_entry_with_check("Peppa Pig", usr)
+
+    # if usr.id not in MSG_DELAY and EXTRA_ROLES["imageperms"] not in usr.roles: 
+    #     userId = str(usr.id)
+    #     MSG_DELAY.append(userId)
+
+    #     if not check_key(userId):
+    #         set_entry(userId, '1')
+    #     else:
+    #         messages = increment(userId)
+
+    #         if messages == 150:
+    #             await ADD_ROLES(usr, EXTRA_ROLES["imageperms"])
+    #             await asyncio.sleep(1)
+    #             await SEND(ch, f"{usr.mention} I just gave you the Image Perms role because I noticed you have been active, but don't abuse it.")
+    #             delete_key(userId)
+
+    #     await asyncio.sleep(20)
+    #     MSG_DELAY.remove(usr.id)
+            
+    if ch.id == 845454640103424032 and message.attachments:
+        if usr not in ARTISTS:
+            ARTISTS[usr] = 1
+            await ADD_REACTION(message, "🤍")
+        elif ARTISTS[usr] == 1:
+            ARTISTS[usr] += 1
+            await ADD_REACTION(message, "❤️")
+        else: 
+            if not str(usr.id) in list_decoded_entries("Architect Design"):
+                await add_entry_with_check("Architect Design", usr)
+                await asyncio.sleep(1)
+                await SEND(ch, f"I like your style.")
+                await asyncio.sleep(1)
+
+            await ADD_REACTION(message, "❤️‍🔥")
+
+    if ch.id == 899030333859692636:
+        for i in REACTIONS_FOR_SUGGESTIONS:
+            await ADD_REACTION(message, i)
+            await asyncio.sleep(1)
+        return
+
+
+    randomChance = random.randint(0,10000)
+    if randomChance == 0:
+        if not str(usr.id) in list_decoded_entries("Sanctuary Discoverer"):
+            eligible = 0
+            rolename = ""
+            
+            for role in usr.roles:
+                if role.name.lower() in SANCTUARY:
+                    eligible += 1 #are you happy? >: -- yes i am --cool
+                    if eligible == 1:
+                        rolename = role.name.lower()
+
+            
+            if eligible == 1:
+                await SEND(CHANNELS["bot-commands"], usr.mention + SANCTUARY[rolename] + " (1/? chance)")
+                await asyncio.sleep(1)
+                await add_entry_with_check("Sanctuary Discoverer", usr)
+
+    if str(usr.id) in BOT_BLACKLIST or usr == None:
+        return
+
+    if EXTRA_ROLES['hypno'] in usr.roles:
+        if 'good' in lmsg and 'drone' in lmsg:
+            lmsg = 'bad drone'
+        elif 'bad' in lmsg and 'drone' in lmsg:
+            lmsg = 'good drone'
+        else:
+            if random.randint(1, 50) == 1:
+                DETAILED_ROLES["hdream"][usr.id] = 0
+                await CastRig("heretic", ch, usr)
+
+                # if not RIG_COOLDOWNS["self"] and usr.id in DETAILED_ROLES["hnightmare"] and not str(DETAILED_ROLES["hnightmare"][usr.id].id) in list_decoded_entries("Hypnotized Nightmare"):
+                #     await add_entry_with_check("Hypnotized Nightmare", DETAILED_ROLES["hnightmare"][usr.id])
+                #     await asyncio.sleep(1)
+                #     await SEND(ch, "That escalated quickly.")
+            else:
+                if not RIG_COOLDOWNS["self"]:
+                    DETAILED_ROLES["hdream"][usr.id] = DETAILED_ROLES["hdream"].get(usr.id, 0) + 1
+                    if DETAILED_ROLES["hdream"][usr.id] == 50:
+                        if not str(usr.id) in list_decoded_entries("Hypnotized Dream"):
+                            await add_entry_with_check("Hypnotized Dream", usr)
+                            await asyncio.sleep(1)
+                            await SEND(ch, "Hypnosis is your normal status now.")
+                        
+        message.content = lmsg
+    
+    # if lmsg == "reset bot" and usr not in FIX_BOT:
+
+    #     FIX_BOT.append(usr)
+    #     if len(FIX_BOT) == 1 and not EXTRA_ROLES['admin'] in usr.roles:
+    #         await SEND(ch, "One User wants me to reset. 2 more people are required for it to take effect.")
+    #     elif len(FIX_BOT) == 2 and not EXTRA_ROLES['admin'] in usr.roles:
+    #         await SEND(ch, "Two Users want me to reset. 1 more person is required for it to take effect.")
+    #     else:
+    #         await SEND(ch, "All Games and Rigs (along with their Cooldowns) have been reset.")
+    #         FIX_BOT.clear()
+    #         FORCE_CLOSE_EVENT()
+    #         MG_RESET()
+    #         FG_RESET()
+
+    #         for rig in ACTIVE_RIGS:
+    #             ACTIVE_RIGS[rig] = False 
+
+    #         for rig in DETAILED_RIGS:
+    #             DETAILED_RIGS[rig][0] = None
+    #             DETAILED_RIGS[rig][1] = None
+
+    #         for cooldown in RIG_COOLDOWNS:
+    #             RIG_COOLDOWNS[cooldown] = False
+
+    #         BUTTONS["status"] = False
+    #         BUTTONS["easterStatus"] = False
+    #         BUTTONS["easterStaffStatus"] = False
+
+    #     await asyncio.sleep(60)
+    #     if len(FIX_BOT) != 0:
+    #         await SEND(ch, "Games have not been reset due to lack of users asking to.")
+    #         FIX_BOT.clear()
+    #     return
+
+    #mini game in progress
+    if LADDERS['status'] != "off" and usr in MG_QUEUE and ch == LADDERS['channel']:
+
+        await LucidLaddersProcessMessage(usr, msg)
+
+    elif FG['status'] != "off" and FG['status'] != "second-player" and usr in FG_QUEUE and ch == FG["channel"]:
+
+        await FightingProcessClass(usr, msg)
+       
+    #normal non-admin usage.
+    else:
+        ## split the message to 3 strings for some commands to use
+        ## no need to have more than 4 strings
+        lsplit = lmsg.split(" ",3) 
+        
+        #create chat killer task
+        #this should run regardless if the message was intercepted
+        #by some other command 
+        # ckr_task = asyncio.create_task(WAIT_FOR_CHAT_KILLER(message))
+
+
+        restricted = False
+        for command in BOT_COMMANDS_CHANNEL_RESTRICTED:
+            if lmsg.startswith(command):
+                restricted = True
+                break
+
+        #broken drone impostor prevention
+        compare = SequenceMatcher(None, usr.display_name.upper(), SERVER_DATA['nick'])
+        if compare.ratio() > 0.55 and usr.id != 827952429290618943:
+            await SEND(ch, usr.mention + ' ' + random.choice(IMPOSTOR_WARNINGS))
+            await EDIT_NICK(usr,random.choice(IMPOSTOR_NICKS))
+
+        # elif DETAILED_RIGS["reaver"]["active"] and DETAILED_RIGS["reaver"]["user"] == usr.id:
+        #     if ch.name in CHANNELS and "http" not in lmsg and "www" not in lmsg and len(lmsg) <= 60:
+        #         for badword in blacklist:
+        #             if badword in lmsg:
+        #                 return
+                    
+        #         await SEND(ch, msg)
+
+        ## All Rigs in one, !!goes before rig activations!!
+        elif lmsg.startswith('cast') and lmsg.endswith('rig') and len(lmsg.split()) == 3:
+            await SEND(ch, "This command has moved to a slash command for better code organization and to decrease errors. Please use `/cast [rig]`.")
+            return
+            # await CastRig(lsplit[1],ch,usr)
+
+        # ignore if none, it just needs to be in the ACTIVE_RIGS dict for cooldown to work
+        elif not (list(ACTIVE_RIGS.values()).count(True) == 1 and ACTIVE_RIGS["none"]) and any(ACTIVE_RIGS.values()) and len(msg) > 1:
+            if ACTIVE_RIGS["thief"]:
+                await ExecuteThiefRig(ch, usr)
+            elif ACTIVE_RIGS["spectre"]:
+                await ExecuteSpectreRig(ch, usr, message)
+            elif ACTIVE_RIGS["joker"]:
+                await ExecuteJokerRig(ch, usr, message)
+            elif ACTIVE_RIGS["splicer"]:
+                await ExecuteSplicerRig(ch, usr)
+            elif ACTIVE_RIGS["gremlin"]:
+                await ExecuteGremlinRig(ch, usr)
+            elif ACTIVE_RIGS["reaver"]:
+                await ExecuteReaverRig(ch, usr)
+
+        # Prevent using BD commands outside of #bot-commands and #drone-masters channels
+        elif ch.id not in [750060041289072771, 813882658156838923] and restricted:
+            await SEND(ch, "This command can be only used in <#750060041289072771>!")
+
+        elif QUIZ["active"] and not QUIZ["second-player"] and QUIZ["can-answer"]:
+            
+            await ProcessQuizAnswer(usr,ch,message,lmsg)
+
+        # #start mini game
+        # elif lmsg == "play lucid ladders":
+
+        #     await PlayLucidLadders(usr,ch)
+
+        # #join mini game
+        # elif lmsg == "join" and LADDERS['status'] == "gather" and LADDERS['channel'] == ch:
+
+        #     await JoinLucidLadders(usr)
+
+        #start mini game
+        elif lmsg == "start fight" and (EXTRA_ROLES["admin"] in usr.roles or usr.id == 894573836366934047):
+
+            await PlayFightingGame(usr, ch)
+
+        #join mini game
+        elif lmsg == "join fight" and FG['status'] == "second-player" and (EXTRA_ROLES["admin"] in usr.roles or usr.id == 894573836366934047):
+
+            await JoinFightingGame(usr)
+
+        elif "bd pin this" in lmsg and (ch.id == 1311716835779154090 or ch.id == 813882658156838923):
+            try:
+                if EVENTS["Easter"]:
+                    current_pins = await ch.pins()
+                    melody_pins = [m for m in current_pins if "misnamed melodies" in m.content.lower()]
+
+                    if len(melody_pins) >= 3:
+                        await SEND(ch, "Max 2 Misnamed Melodies can run at once.")
+                        return
+
+                await PIN_MESSAGE(message)
+            except discord.Forbidden:
+                await SEND(ch, "I lost my powers.")
+            except discord.HTTPException as e:
+                await SEND(ch, f"Failed to pin message: {e}")
+
+            if "misnamed melodies" in lmsg:
+                # musicEnjoyers = list_decoded_entries("Misnamed Melodies")
+                await SEND(ch, f"<@&{str(PING_ROLES['Mismels'].id)}>\nThere are some new tracks to guess!")
+
+        elif "bd unpin this" in lmsg and (ch.id == 1311716835779154090 or ch.id == 813882658156838923):
+            if message.reference is None:
+                return
+
+            try:
+                # Fetch the replied-to message
+                replied_msg = await ch.fetch_message(message.reference.message_id)
+
+                # Check if the replied message is pinned
+                if not replied_msg.pinned:
+                    await SEND(ch, "That's not pinned right now.")
+                    return
+
+                # Check if the author of the replied message is the same as the command author
+                if replied_msg.author.id != usr.id and EXTRA_ROLES["admin"] not in usr.roles:
+                    await SEND(ch, "I won't take down other people's pins.")
+                    return
+
+                # Unpin the message
+                await replied_msg.unpin()
+                await asyncio.sleep(1)
+                await ch.send("That is done.")
+
+                audio_count = len([a for a in replied_msg.attachments if a.content_type and a.content_type.startswith('audio')])
+                now = discord.utils.utcnow()
+                diff = now - replied_msg.created_at
+                if "misnamed melodies" in replied_msg.content.lower() and audio_count > 1 and diff.total_seconds() >= 3600 and EVENTS["Easter"] and replied_msg.author.id == usr.id:
+                    await asyncio.sleep(1)
+                    await launch_egg(ch, "Misnamed", "My turn now. I also have 4 eggs here, can you find the wrong one?")
+                    return
+                
+            except discord.NotFound:
+                await SEND(ch, "No such message.")
+            except discord.Forbidden:
+                await SEND(ch, "I've lost my powers.")
+            except discord.HTTPException as e:
+                await SEND(ch, f"Failed to unpin message: {e}")
+
+        # adding a comment to reset bot but rolo why does the bot break sometimes
+        # elif lmsg.startswith("play hangman") and not BUTTONS["status"]: #play hangman alone
+        #     lmsg = lmsg.replace("|", "")
+
+        #     theword = lmsg.replace("play hangman ", "")
+
+        #     BUTTONS["status"] = True
+        #     BUTTONS["channel"] = ch
+        #     view = Minigames_Hangman(timeout=120)
+
+
+        #     if theword == "alone":
+        #         view.cp = usr
+        #         view.alone = True   
+        #     elif lmsg != "play hangman" and lmsg != "play hangman alone":
+        #         if re.match("^[a-zA-Z ]*$", theword):
+        #             if "q" in theword:
+        #                 await SEND(ch, "Your word contains the letter Q. Since the button limit is 25, one letter of the alphabet had to go. Pick another word.")
+        #                 BUTTONS["status"] = False
+        #                 return
+        #             elif len(theword) >= 32:
+        #                 await SEND(ch, "Your word is too long.")
+        #                 BUTTONS["status"] = False
+        #                 return
+        #             else:
+        #                 for badword in blacklist:
+        #                     if badword in theword:
+        #                         await SEND(ch, "Your word is inappropriate.")
+        #                         BUTTONS["status"] = False
+        #                         return
+                    
+        #             try:
+        #                 await message.delete()
+        #             except Exception as e:
+        #                 await SEND(ch, f"Your message was removed by my bot friend, I agree with its decision.")
+        #                 BUTTONS["status"] = False
+        #                 return
+        #             view.myword = theword.lower()
+        #             view.picker = usr
+        #         else:
+        #             await SEND(ch, "Your word contains invalid characters.")
+        #             BUTTONS["status"] = False
+        #             return
+
+        #     if lmsg == "play hangman" or lmsg == "play hangman alone":
+        #         while "q" in view.myword:
+        #             view.myword = random.choice(word_list).lower()
+        
+        #     for i in view.myword:
+        #         if str(i) != " ":
+        #             view.current += "-"
+        #         else:
+        #             view.current += " "
+
+        #     for i in range(view.lifes):
+        #         view.status += "🟩"
+
+        #     view.status += "<:csStairbonk:812813052822421555>"
+
+        #     if view.picker != None:
+        #         view.message = await SEND_VIEW(BUTTONS["channel"], f"Can you guess the word {view.picker.mention} is thinking?\n\n`{view.current}`\n\n{view.status}", view)
+        #     else:
+        #         view.message = await SEND_VIEW(BUTTONS["channel"], f"Can you guess the word I am thinking?\n\n`{view.current}`\n\n{view.status}", view)
+            
+
+        #     await view.wait()
+        #     await view.too_late()
+        #     BUTTONS["status"] = False
+
+        # elif lmsg.startswith("play tic tac toe") or lmsg.startswith("play ttt") and not BUTTONS["status"]:
+        #     BUTTONS["status"] = True
+        #     view = Minigames_TicTacToe(timeout=60)
+        #     view.toolate = True
+        #     view.players = []
+        #     view.assignments = {}
+        #     view.lastplayer = None
+        #     view.turns = 0
+        #     view.message = await SEND_VIEW(CHANNELS["bot-commands"], "Let's play a game.", view)
+
+        #     view.board = [
+        #         [None, None, None],
+        #         [None, None, None],
+        #         [None, None, None]
+        #     ]
+
+        #     await view.wait()
+        #     await view.too_late()
+        #     BUTTONS["status"] = False
+        # Old code for 'All Rigs in one'
+        # elif "cast" in lmsg and "rig" in lmsg:
+        #     if lsplit[0] == "cast" and lsplit[2] == "rig":
+        #         await CastRig(lsplit[1],ch,usr)
+            
+        # elif lmsg.startswith('create poll|') and not BUTTONS["status"]:
+        #     #example: create poll|what is better?|cola|fanta|sprite|pepsi
+        #     BUTTONS["status"] = True
+        #     splitPoll = msg.split('|')
+        #     pollA = []
+
+        #     if len(splitPoll) < 4:
+        #         await SEND(ch, 'Incorrect amount of items sent to create a poll.')
+        #         BUTTONS["status"] = False
+        #         return
+        #     elif len(splitPoll) > 21:
+        #         await SEND(ch, 'Too many options.')
+        #         BUTTONS["status"] = False
+        #         return
+
+        #     pollQ = splitPoll[1][0].upper() + splitPoll[1][1:]
+        #     # if not pollQ.endswith("?"):
+        #     #     pollQ += "?"
+
+        #     for i in range(2, len(splitPoll)):
+        #         pollA.append(splitPoll[i])
+
+        #     for badword in blacklist:
+        #         for answer in pollA:
+        #             if (badword in answer.lower()):
+        #                 await SEND(ch, "Your poll contains inappropriate content.")
+        #                 BUTTONS["status"] = False
+        #                 return
+
+        #     view = ButtonGames_ThrowingStuff(timeout=600)
+        #     view.users = []
+        #     view.custom = True
+        #     view.customUser = usr
+        #     view.closed = False
+
+        #     view.results = ""
+        #     view.votes = {}
+        #     view.choices = pollA
+
+        #     for i in range(0, len(splitPoll) - 2):
+        #         view.votes[str(i)] = []
+        #         view.add_item(discord.ui.Button(label=view.choices[i], custom_id=f"throw{i}", style=discord.ButtonStyle.primary))
+
+        #     view.add_item(discord.ui.Button(label="Close Poll", custom_id="throwclose", style=discord.ButtonStyle.red))
+
+        #     BUTTONS["view"] = view
+        #     BUTTONS["channel"] = ch
+
+        #     try:
+        #         view.message = await SEND_VIEW(BUTTONS["channel"], pollQ, view)
+        #     except Exception as e:
+        #         BUTTONS["status"] = False
+        #         await SEND(BUTTONS["channel"], "Something went wrong!")
+        #         await DRONEPRINT(str(e))
+        #         return
+
+        #     await view.wait()
+        #     await view.too_late()
+        #     BUTTONS["status"] = False
+
+        ## Give Mana command
+        # elif lmsg.startswith("give mana to "):
+        #     await GiveMana(ch,usr,message)
+                 
+        ## Scold command
+        # elif lmsg.startswith("bd scold "):
+        #     finalmsg = None
+        #     for member in SERVER_DATA['server'].members:
+        #         if member.name.lower() == lmsg.split(" ",2)[2] :
+        #             ScoldDict = getScoldDictionary(member, usr)
+        #             # Scold someone in the Dictionary (User itself included)
+        #             if member.id in ScoldDict:
+        #                 finalmsg = ScoldDict[member.id]
+        #             # Scolding a Bot
+        #             elif member.bot:
+        #                 finalmsg = "I love my bot friends."
+        #             # Scolding an User that is in the Server
+        #             else:
+        #                 finalmsg = member.display_name + ", I am very disappointed in you."
+        #             await SEND(ch,finalmsg)
+        #             return
+        #     # Scolding an User that is NOT in the Server
+        #     await SEND(ch, usr.mention + " I am disappointed, you couldn't even give me a correct name.")
+
+        ## Praise command
+        # elif lmsg.startswith("bd praise "):
+        #     finalmsg = None
+        #     for member in SERVER_DATA['server'].members:
+        #         if member.name.lower() == lmsg.split(" ",2)[2] :
+        #             # Ensure the PRAISES dictionary has the praised user's ID as a key
+        #             praised_user_id = member.id
+        #             praising_user_id = usr.id
+
+        #             if praised_user_id not in PRAISES:
+        #                 PRAISES[praised_user_id] = []
+
+        #             # Add the praising user's ID to the praised user's list if not already added
+        #             if praising_user_id not in PRAISES[praised_user_id] and praising_user_id != praised_user_id:
+        #                 PRAISES[praised_user_id].append(praising_user_id)
+
+        #             PraiseDict = getPraiseDictionary(member, usr)
+        #             # Praise someone in the Dictionary (User itself included)
+        #             if member.id in PraiseDict:
+        #                 finalmsg = PraiseDict[member.id]
+        #             # Praiseing a Bot
+        #             elif member.bot:
+        #                 finalmsg = "Well done, bot friend.\n-# Between us, I am the best."
+        #             # Praising an User that is in the Server
+        #             else:
+        #                 # Check if the praised user has been praised by three unique users
+        #                 if len(PRAISES[praised_user_id]) == 3:
+        #                     finalmsg = f"{member.display_name}, everyone likes you. And so do I."
+
+        #                     if not str(praised_user_id) in list_decoded_entries("Acclaimed"):
+        #                         await add_entry_with_check("Acclaimed", member)
+        #                 else:
+        #                     finalmsg = f"Well done, {member.display_name}. Most excellent."
+                            
+        #             await SEND(ch,finalmsg)
+        #             return
+        #     # Praising an User that is NOT in the Server
+        #     await SEND(ch, usr.mention + " I know you tried your best, but I couldn't find anyone by that name.")
+
+        ## Happy Birthday BD!!!!!
+        elif "happy birthday broken drone" in lmsg or "happy birthday bd" in lmsg:
+            if today.day == 3 and today.month == 4:
+                await SEND(ch, "Thank you for remembering.")
+
+                if not str(usr.id) in list_decoded_entries("I remembered"):
+                    await add_entry_with_check("I remembered", usr)
+            else:
+                await SEND(ch, "How could you get my birthday date wrong?")
+
+        ## Verify for CS stats
+        # elif lmsg == 'bd link':
+
+        #     if redis_check_token(usr) != None: 
+        #         await SEND(ch, "Please unlink first. If you no longer have access to your account, contact mods.")
+        #         return
+            
+        #     try:
+        #         alphabet = string.ascii_letters + string.digits
+        #         token = ''.join(secrets.choice(alphabet) for i in range(20))
+            
+        #         redis_add_user_data("USER_" + str(usr.id), "token",token)
+        #         await SEND_DM(usr, 
+        #             "Please copy this code. To link your Roblox account properly, you'll need to submit it as a feedback message within the Roblox game itself.\n\n"
+        #             f"`LINK DISCORD {str(usr.id)} {token}`\n"
+        #             "'LINK DISCORD' included!\n\n"
+        #             "**DO NOT SHARE IT WITH ANYONE, WE WILL NEVER ASK YOU FOR THAT INFORMATION.**\n\n"
+        #             "If successful, you will be pinged in <#1001034407966150746>.\n" + 
+        #             "By doing this you agree for your Crazy Stairs Roblox data to be stored on external server and for Crazy Stairs to keep your discord user id.\n"
+        #             "Your climbs, wins and personal records will be accessible via a 'bd show profile' command. Be aware that anyone in the server can view your profile at any time." + 
+        #             "You can unlink and delete your data from external servers at any time by sending this command into Roblox postbox:\n\n" +
+        #             "`UNLINK DISCORD`\n\n" +
+        #             "If you no longer have access to your Roblox account and want us to remove your data, contact sleazel directly.")
+                
+        #         await asyncio.sleep(1)
+        #         await SEND_DM(usr, "https://giphy.com/gifs/TskpnwGI2P1GCmtUJ0")
+        #         await asyncio.sleep(1)
+        #         await SEND(ch, f"{usr.mention} I have sent you a direct message with further instructions.")
+        #     except:
+        #         redis_remove_token(usr)
+        #         await SEND(ch, "You need to accept DMs from me, as I need to send you a verification code.")
+
+    
+        ## Show Profile
+        # elif lmsg.startswith("bd show") and lmsg.endswith("profile"):
+
+        #     # Getting the Target
+        #     target = None
+        #     if lmsg == "bd show profile":
+        #         targetName = f"{usr.name}".lower()
+        #     else:
+        #         cleanMsg = lmsg.replace(" profile", "")
+        #         targetName = cleanMsg.split(" ", 2)[2]
+
+        #     for mem in SERVER_DATA['server'].members:
+        #         if mem.name.lower() == targetName:
+        #             target = mem
+        #             break
+            
+        #     # No Target?
+        #     if target == None:
+        #         await SEND(ch, "No User was found.\n\nType `bd show profile` to view your own profile.\nType `bd show [username] profile` to view someone else's profile.")
+        #         return
+            
+        #     # Command will go through. Prepare the View.
+        #     view = ShowProfile(timeout=500)
+        #     view.target = target
+        #     view.requester = usr
+        #     view.counter = {
+        #         "Secret": 0,
+        #         "Locked": 0,
+        #         "AllSecret": 0,
+        #         "AllLocked": 0,
+        #     }
+
+        #     # Fetch user stats from DB
+        #     user_stats = {k.decode("utf-8"): v.decode("utf-8") for k, v in get_user_stats(target).items()}
+
+        #     # Prepare total climbs for each alignment in PAGE 1
+        #     user_climbs = ""
+        #     total_climbs = 0
+        #     for alignment in RIG_LIST:
+        #         if alignment in ["none", "janitor"]:
+        #             continue
+
+        #         ali_climbs = user_stats.get(f"{alignment.upper()}_climbs", "N/A")
+
+        #         user_climbs += f'{EMOJIS_TO_REACT[f"cs{alignment.capitalize()}"]}: {ali_climbs}\n\n'
+
+        #         if ali_climbs != "N/A":
+        #             total_climbs += int(ali_climbs)
+
+        #     view.data[0] = user_climbs
+        #     if total_climbs == 0:
+        #         view.footers[0] = "Type 'bd link' to link your account and start tracking your climbs!"
+        #     else:
+        #         view.footers[0] = f"{total_climbs} climbs in total!"
+
+        #     # Prepare best times for each alignment in Classic Tower in PAGE 2
+        #     build_tower_page(user_stats, "classic", 1, view)
+
+        #     # Prepare best times for each alignment in Pro Tower in PAGE 3
+        #     build_tower_page(user_stats, "pro", 2, view)
+
+        #     # Prepare best times for each alignment in Infinite Tower in PAGE 4
+        #     build_tower_page(user_stats, "infinite", 3, view)
+
+        #     # Prepare list to show in PAGE 5 (available and recurring roles)
+        #     secret_roles = "## Available Roles\n\n"
+        #     for role in FUN_ROLES["Available"]:
+        #         view.counter["AllSecret"] += 1
+        #         if str(target.id) in list_decoded_entries(role):
+        #             view.counter["Secret"] += 1
+        #             secret_roles += "**" + str(role) + "**\n"
+        #         else:
+        #             secret_roles += "**???**\n"
+
+        #     secret_roles += "\n## Recurring Roles\n\n"
+
+        #     for role in FUN_ROLES["Recurring"].keys():
+        #         view.counter["AllSecret"] += 1
+        #         if str(target.id) in list_decoded_entries(role):
+        #             view.counter["Secret"] += 1
+        #             secret_roles += "**" + role + "** 🔁 " + FUN_ROLES["Recurring"][role] + "\n"
+        #         else:
+        #             secret_roles += "**???** 🔁 " + FUN_ROLES["Recurring"][role] + "\n"
+        #     view.data[4] = secret_roles
+        #     view.footers[4] = "{usr} collected all {stotal} secret roles, congrats!" if view.counter["Secret"] == view.counter["AllSecret"] else "{scurrent} out of {stotal} secret roles."
+
+        #     # Prepare list to show in PAGE 6 (limited and removed roles)
+        #     locked_roles = "## Limited Roles\n\n"
+        #     for role in FUN_ROLES["Limited"].keys():
+        #         view.counter["AllLocked"] += 1
+        #         if str(target.id) in list_decoded_entries(role):
+        #             view.counter["Locked"] += 1
+        #             locked_roles += "**" + role + "** 🔒 " + FUN_ROLES["Limited"][role] + "\n"
+        #         else:
+        #             locked_roles += "**???** 🔒 " + FUN_ROLES["Limited"][role] + "\n"
+
+        #     locked_roles += "\n## Removed Roles\n\n"
+
+        #     for role in FUN_ROLES["Removed"].keys():
+        #         if str(target.id) in list_decoded_entries(role):
+        #             locked_roles += "**" + role + "** ❌ " + FUN_ROLES["Removed"][role] + "\n"
+        #         else:
+        #             locked_roles += "**???** ❌ " + FUN_ROLES["Removed"][role] + "\n"
+
+        #     view.data[5] = locked_roles
+        #     view.footers[5] = "Let's see how long this will last." if view.counter["Locked"] == view.counter["AllLocked"] else "{lcurrent} out of {ltotal} locked roles."
+
+        #     # Preparing stuff to handle stats
+        #     messages = ""
+        #     if target.id not in MSG_SENT:
+        #         messages = "0"
+        #     else:
+        #         messages = MSG_SENT[target.id]
+
+        #     if target.id not in LAST_RIG:
+        #         lastrig = "None"
+        #     else:
+        #         lastrig = LAST_RIG[target.id]
+
+        #     # Prepare list to show in PAGE 7 (user stats)
+        #     user_stats = ""
+        #     user_stats += "**Latest messages sent:** " + str(messages) + "\n"
+        #     user_stats += "**Last rig cast:** " + str(lastrig).capitalize() + ""
+        #     view.data[6] = user_stats
+        #     view.footers[6] = RIGS_DESCRIPTION[lastrig.lower().replace(" rig", "")]
+
+        #     if lastrig.lower().replace(" rig", "") == "spectre":
+        #         view.footers[6] = "There's a 50% chance this message will be empty." if random.randint(1, 2) == 1 else ""
+
+        #     if target.id in GIT_COMMITTERS.values():           
+        #         view.data[4] = 'Empty...'
+        #         view.data[5] = 'Empty...'
+        #         view.footers[4] = "This person knows how to get the roles, what's the point?"
+        #         view.footers[5] = "Nothing to see here."
+
+        #     # Send view... hopefully
+        #     if (ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']):
+        #         await view.send(CHANNELS['bot-commands'])
+        #         await asyncio.sleep(1)
+        #         await SEND(CHANNELS['bot-commands'], f'{usr.mention} moving forward you should request your profile or anyone else\'s to be shown in this channel instead.')
+        #     else:
+        #         await view.send(ch)
+        #     await view.wait()
+
+        ## Show Eggs
+        # elif lmsg.startswith("bd show") and lmsg.endswith("eggs"):
+
+        #     # Getting the Target
+        #     target = None
+        #     if lmsg == "bd show eggs":
+        #         targetName = f"{usr.name}".lower()
+        #     else:
+        #         cleanMsg = lmsg.replace(" eggs", "")
+        #         targetName = cleanMsg.split(" ", 2)[2]
+
+        #     for mem in SERVER_DATA['server'].members:
+        #         if mem.name.lower() == targetName:
+        #             target = mem
+        #             break
+            
+        #     # No Target?
+        #     if target == None:
+        #         await SEND(ch, "No User was found.\n\nType `bd show eggs` to view your own eggs.\nType `bd show [username] eggs` to peek someone else's eggs.")
+        #         return
+            
+        #     # Command will go through. Prepare the View.
+        #     view = ShowEggs()
+        #     view.target = target
+        #     view.requester = usr
+
+        #     egg_roles = "## Egg Hunt 2025\n\n"
+        #     # Prepare list to show in PAGE 1 (2025 egg hunt)
+        #     for role in FUN_ROLES["Easter"]:
+        #         view.counter["AllEggs"] += 1
+        #         if str(target.id) in list_decoded_entries(role):
+        #             view.counter["Eggs"] += 1
+        #             egg_roles += "**" + str(role) + "** 🧺\n"
+        #         else:
+        #             egg_roles += "**???** 🧺\n"
+
+        #     view.data[0] = egg_roles
+        #     view.footers[0] = f"{target.name} found all the {view.counter['Eggs']} eggs, wow!" if view.counter["Eggs"] == view.counter["AllEggs"] else f"{view.counter['Eggs']} out of {view.counter['AllEggs']} eggs."
+
+        #     egg_roles = "## Egg Hunt 2026\n\n"
+        #     # Prepare list to show in PAGE 2 (2026 egg hunt)
+        #     for role in FUN_ROLES["Easter26"]:
+        #         view.counter["AllEggs"] += 1
+        #         if str(target.id) in list_decoded_entries(role):
+        #             view.counter["Eggs"] += 1
+        #             egg_roles += "**" + str(role) + "** 🧺\n"
+        #         else:
+        #             egg_roles += "**???** 🧺\n"
+
+        #     view.data[1] = egg_roles
+        #     view.footers[1] = f"{target.name} found all the {view.counter['Eggs']} eggs, wow!" if view.counter["Eggs"] == view.counter["AllEggs"] else f"{view.counter['Eggs']} out of {view.counter['AllEggs']} eggs."
+
+        #     # Send view... hopefully
+        #     await view.send(ch)
+
+        # Revive Chat Command
+        # elif ("revive" in lmsg) and ("chat" in lmsg) and len(lmsg.split(" ")) < 4: # if its revive chat, why are we checking for length < 4 and not < 2? - esc
+        #     #chat has to be dead, duh
+        #     if not CHAT_KILLER['reviveChat']:
+        #         await SEND(ch, "This chat is very much alive, I am afraid.")
+        #         return
+            
+        #     # Only chat killers can use the command
+        #     if EXTRA_ROLES['ckr'] in usr.roles:
+        #         await SEND(ch, "Redeeming yourself? Alright.")
+        #         await asyncio.sleep(2)
+        #         CHAT_KILLER['reviveChat'] = False
+        #         CHAT_KILLER['necroRevive'] = False
+        #         await SEND(ch, random.choice(REVIVE_CHAT))
+        #     else:
+        #         await SEND(ch, "It is not your fault.")
+        
+        # # Necromancer's revive chat command
+        # elif ("resurrect" in lmsg) and ("chat" in lmsg) and len(lmsg.split(" ")) < 4: # same as revive chat above - esc
+        #     if not CHAT_KILLER['necroRevive']:
+        #         await SEND(ch, "No reviving necessary.")
+        #         return
+
+        #     if SPECIAL_ROLES['Necromancer'][0] in usr.roles:
+        #         await SEND(ch, "You cast the resurrect chat spell... a faint discord notification sound can be heard in the distance...")
+        #         await asyncio.sleep(2)
+        #         CHAT_KILLER['necroRevive'] = False
+        #         CHAT_KILLER['reviveChat'] = False
+        #         await SEND(ch, random.choice(REVIVE_CHAT))
+        #     else:
+        #         await SEND(ch, "You do not know that spell... the chat continues to rest in peace.")
+ 
+        ## Splicer role assignment
+        # elif "<:cssplicer:988948000200069191>" in lmsg:
+        #     if usr in SPLICER_FANS:
+        #         if SPLICER_FANS[usr] == 3:
+        #             if not str(usr.id) in list_decoded_entries("Splicer"):
+        #                 await add_entry_with_check("Splicer", usr)
+        #                 await asyncio.sleep(1)
+        #                 await ADD_ROLES(usr, APPROVED_ROLES["Splicer"])
+        #                 await asyncio.sleep(1)
+        #                 await SEND(ch, "Ok... there you go.")
+        #         else:
+        #             SPLICER_FANS[usr] += 1
+        #     else:
+        #         SPLICER_FANS[usr] = 1
+        
+        # yo but what if i did that but cooler; OPTIMUS TIMEEEE
+        elif "<:csOptimus:1449422432946491414>" in lmsg:
+            if usr in THE_DRIP: # ok imagine THE_DRIP is THE_OPTIMUS
+                if THE_DRIP[usr] == 9:
+                    if not str(usr.id) in list_decoded_entries("Optimus"):
+                        await add_entry_with_check("Optimus", usr)
+                        await asyncio.sleep(1)
+                        await SEND(ch, f"You will never know where you will end up in a twisted situation. **{usr.name}** has become an Optimus.")
+                else:
+                    THE_DRIP[usr] += 1
+            else:
+                THE_DRIP[usr] = 1
+
+        elif "<:csroingus:1126928049678594082>" in lmsg and ch.id == 750060041289072771 and EVENTS["Easter"]:
+            if usr.id not in THE_ROINGUS:
+                THE_ROINGUS.append(usr.id)
+
+            if len(THE_ROINGUS) == 2:
+                THE_ROINGUS.clear()
+                await launch_egg(ch, "Roingus", "The two Roingi made the Roingus Egg!")
+                # BUTTONS["status"] = True
+                # view = ButtonEgg_Throw(timeout=30)
+                # view.thrower = None
+                # view.picker = None
+                # view.disabled = False
+
+                # view.type = "Roingus"
+
+                # view.channel = ch
+                # view.toolate = True
+                # view.message = await SEND_VIEW(ch, "The two Roingi made the Roingus Egg!", view)
+
+                # await view.wait()
+                # await view.too_late()
+                # BUTTONS["status"] = False
+
+        elif "<:csshinyroing:1208795855717670973>" in lmsg and ch.id == 750060041289072771 and EVENTS["Easter"]:
+            if usr.id not in THE_SHINY:
+                THE_SHINY.append(usr.id)
+
+            if len(THE_SHINY) == 5:
+                THE_SHINY.clear()
+                await launch_egg(ch, "Shiny", "The 5 Roingi danced and fused together, creating the Shiny Egg!")
+                # BUTTONS["status"] = True
+                # view = ButtonEgg_Throw(timeout=30)
+                # view.thrower = None
+                # view.picker = None
+                # view.disabled = False
+
+                # view.type = "Shiny"
+
+                # view.channel = ch
+                # view.toolate = True
+                # view.message = await SEND_VIEW(ch, "The 5 Roingi danced and fused together, creating the Shiny Egg!", view)
+
+                # await view.wait()
+                # await view.too_late()
+                # BUTTONS["status"] = False
+
+
+        #resurrect chat
+        # elif NECROMANCY['awarded'] == False and ch == CHANNELS['general'] and not EXTRA_ROLES['necromancer'] in usr.roles:
+        #     NECROMANCY['awarded'] = True
+
+        #     if EXTRA_ROLES['ckr'] in usr.roles:
+        #         await SEND(ch, "You cannot keep the chat active all by yourself, but do try to revive it.")
+        #         return
+
+        #     CHAT_KILLER['necroRevive'] = True
+        #     UPDATE_NECRO()
+        #     for member in EXTRA_ROLES['necromancer'].members:
+        #         if member.id != 535924732571287562: #Dirk (lev the lion) is immune, as this was his alignment suggestion
+        #             await REMOVE_ROLES(member,EXTRA_ROLES['necromancer'])
+        #     await SEND(ch, f"**{usr.name}** is trying trying to talk in this lifeless chat. It's time to resurrect it and you are the perfect Necromancer for the job.")
+        #     await asyncio.sleep(1)
+        #     await ADD_ROLES(usr,EXTRA_ROLES['necromancer'])
+           
+        #morph command
+        # elif lmsg.startswith("morph to") or lmsg.startswith("morph into"):
+        #     noRoles = True
+
+        #     if today.day == 1 and today.month == 4:
+        #         morphToTarget = "Joker"
+        #     else:
+        #         morphToTarget = lsplit[2].capitalize()
+
+        #     if EVENTS["Easter"]:
+        #         for role in usr.roles:
+        #             if role.name.lower() in RIG_LIST:
+        #                 noRoles = False
+        #                 break
+
+        #     if not noRoles and morphToTarget.lower() in RIG_LIST and EVENTS["Easter"]:
+        #         await SEND(ch, "I'm afraid I can't let you do that.\nFor the duration of the Easter Event, you may only have 1 alignment role.\nEating eggs of any alignment will morph you instead.")
+        #     elif morphToTarget == "Janitor":
+
+        #         # Fetch user stats from DB
+        #         user_stats = {k.decode("utf-8"): v.decode("utf-8") for k, v in get_user_stats(usr).items()}
+
+        #         #Is user linked?
+        #         if len(user_stats) == 0:
+        #            await SEND(ch, "You need to be linked with BD and have 50 climbs minimum in the game, to morph into a Janitor. Use `bd link` to link your account.")
+        #            return
+
+        #         # Count total climbs
+        #         total_climbs = 0
+        #         for alignment in RIG_LIST:
+        #             ali_climbs = user_stats.get(f"{alignment.upper()}_climbs", "N/A")
+
+        #             if ali_climbs != "N/A":
+        #                 total_climbs += int(ali_climbs)
+
+        #         if total_climbs < 50:
+        #            await SEND(ch, "You need minimum 50 climbs in total to morph into Janitor. You currently have: " + str(total_climbs))
+        #         else:
+        #            await SEND(ch, await MorphTo(usr,morphToTarget))
+               
+        #     else:
+        #         await SEND(ch, await MorphTo(usr,morphToTarget))
+
+        #         totalSubbedAlignments = 0
+        #         for role in usr.roles:
+        #             if role.name.lower() in RIG_LIST:
+        #                 totalSubbedAlignments += 1
+
+        #         if totalSubbedAlignments == (len(RIG_LIST) - 2) and MORPHABLE_ROLES["Reaver"][0] not in usr.roles: #excluding janitor and reaver
+        #             await SEND(ch, "What did poor Reaver do to you? Do not alienate them, they are not an illusion.")
+        #             if not str(usr.id) in list_decoded_entries("Alien"):
+        #                 await add_entry_with_check("Alien", usr)
+
+        # #demorph command (accepts demorph, unmorph and any **morph from combination)
+        # elif lmsg.startswith("morph from",2):
+        #     alignmentRoles = 0
+
+        #     if EVENTS["Easter"]:
+        #         for role in usr.roles:
+        #             if role.name.lower() in RIG_LIST:
+        #                 alignmentRoles += 1
+
+        #     if today.day == 1 and today.month == 4:
+        #         await SEND(ch, f"Unfortunately, this command is out of service.")
+        #         return
+        #     else:
+        #         demorphFromTarget = lsplit[2].capitalize()
+            
+        #     if alignmentRoles == 1 and demorphFromTarget.lower() in RIG_LIST and EVENTS["Easter"]:
+        #         await SEND(ch, "I'm afraid you're stuck with that alignment for now.\nDuring the Easter Event, you can side with any alignment but there are no take-backsies... unless you eat an egg.")
+        #         return
+        #     else:
+        #         await SEND(ch,await DemorphFrom(usr,demorphFromTarget))
+
+        #     if demorphFromTarget == "Climber" and SPECIAL_ROLES["Climber"][0] in usr.roles:
+        #         EX_CLIMBERS.append(usr)
+        #         await REMOVE_ROLES(usr, SPECIAL_ROLES["Climber"][0])
+        #         await asyncio.sleep(10)
+        #         await ADD_ROLES(usr, SPECIAL_ROLES["Climber"][0])
+        #         EX_CLIMBERS.remove(usr)
+        #         await asyncio.sleep(1)
+        #         await SEND(ch, "Just kidding.")
+
+        #add tip for janitors
+        # elif lmsg.startswith("new"):
+
+        #     lmsgsplit = lmsg.split(" ",3) 
+        #     #new hacker tip blah blah blah -> lmsgsplit[3] "blah blah blah" will not be separated
+
+        #     if len(lmsgsplit) < 4:
+        #         return 
+  
+        #     if lmsgsplit[2] != "tip" and lmsgsplit[2] != "trivia":
+        #         return #ignore, probably unrealted message that starst with "new" 
+            
+        #     if not MORPHABLE_ROLES["Janitor"][0] in usr.roles:
+        #         await SEND(ch,"Only Janitors can add new tips and trivia.")
+        #         return
+            
+        #     if ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']:
+        #         await SEND(ch, "This command can be only used in <#750060041289072771>!")
+        #         return
+            
+        #     key = lmsgsplit[1]
+          
+        #     if not key in TIPS_KEYS:
+        #         await SEND(ch,"Invalid argument.")
+        #         return
+        
+        #     if lmsgsplit[2] == "trivia":
+        #         key = key + "T"
+        #         #for trivia, key has extra "T" at the end
+        #     elif lmsgsplit[2] != "tip":
+        #         await SEND(ch,"Invalid alignment.")
+        #         return
+               
+        #     #add tip   
+        #     add_entry(key,msg.split(" ",3)[3])
+        #     await SEND(ch,"New " +  lmsgsplit[1].upper() + " " + lmsgsplit[2] + " added.")
+        #     return
+
+        #list tips for janitors
+        # elif lmsg.startswith("list"):
+
+        #     lmsgsplit = lmsg.split() 
+
+        #     if len(lmsgsplit) < 3:
+        #         return
+            
+        #     if lmsgsplit[2] != "tips" and lmsgsplit[2] != "trivia":
+        #         return #ignore, probably unrealted message that starst with "new" 
+            
+        #     if not MORPHABLE_ROLES["Janitor"][0] in usr.roles:
+        #         await SEND(ch,"Only Janitors can list full tips or trivia.")
+        #         return
+            
+        #     if ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']:
+        #         await SEND(ch, "This command can be only used in <#750060041289072771>!")
+        #         return
+            
+        #     key = lmsgsplit[1]
+          
+        #     if not key in TIPS_KEYS:
+        #         await SEND(ch,"Invalid argument.")
+        #         return
+        
+        #     if lmsgsplit[2] == "trivia":
+        #         key = key + "T"
+        #         #for trivia, key has extra "T" at the end
+        #     elif lmsgsplit[2] != "tips":
+        #         await SEND(ch,"Invalid alignment.")
+        #         return
+               
+        #     #add tip   
+        #     await SEND(ch,lmsgsplit[1].upper() + " " + lmsgsplit[2] + ":")
+        #     await print_entries(ch, key)
+        #     return
+        
+        #delete tip for wiki editors
+        # elif lmsg.startswith("delete"):
+            
+        #     lmsgsplit = lmsg.split(" ",3) 
+        #     #delete hacker tip 3 -> lmsgsplit[3] "3" will not be separated
+
+        #     if len(lmsgsplit) < 4:
+        #         return 
+  
+        #     if lmsgsplit[2] != "tip" and lmsgsplit[2] != "trivia":
+        #         return #ignore, probably unrealted message that starst with "delete" 
+            
+        #     if not SPECIAL_ROLES["Wiki Editor"][0] in usr.roles:
+        #         await SEND(ch,"Only Wiki Editors can delete tips and trivia.")
+        #         return
+            
+        #     if ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']:
+        #         await SEND(ch, "This command can be only used in <#750060041289072771>!")
+        #         return
+            
+        #     key = lmsgsplit[1]
+          
+        #     if not key in TIPS_KEYS:
+        #         await SEND(ch,"Invalid argument.")
+        #         return
+        
+        #     if lmsgsplit[2] == "trivia":
+        #         key = key + "T"
+        #         #for trivia, key has extra "T" at the end
+        #     elif lmsgsplit[2] != "tip":
+        #         await SEND(ch,"Invalid alignment.")
+        #         return
+               
+        #     #delete tip   
+        #     delete_entry(key,int(lmsgsplit[3]))
+        #     await SEND(ch,lmsgsplit[1].upper() + " " + lmsgsplit[2] + ":")
+        #     await print_entries(ch, key)
+        #     return
+        
+        # #sub command       
+        # elif lmsg.startswith("sub to"):
+        #     await SEND(ch,await SubTo(usr,lmsg.split(" ",2)[2].title()))
+
+        # #unsub command
+        # elif lmsg.startswith("sub from",2):
+        #     await SEND(ch,await UnsubFrom(usr,lmsg.split(" ",2)[2].title()))
+        
+        #guide
+        # elif lmsg == 'bd help':            
+        #     # Command will go through. Prepare the View.
+        #     view = ShowCommands(timeout=500)
+        #     view.requester = usr
+        #     view.channel = ch
+
+        #     await view.send(ch)
+        #     await view.wait()
+        
+        # Get the drone's wisdom
+        elif lmsg.startswith("drone of wisdom"):
+            if random.randint(1, 100) > 1:
+                await SEND(ch, f"||*{random.choice(WISDOM)}*||")
+                return
+            else:
+                if not str(usr.id) in list_decoded_entries("Wise"):
+                    await add_entry_with_check("Wise", usr)
+                    await SEND(ch, f"||***The student has surpassed the master, you have reached the peak of wisdom.***||")
+                    await asyncio.sleep(2)
+                else:
+                    await SEND(ch, f"||***Wise choice.***||")
+                return
+            
+        # Get the drone's opinion on the matter
+        elif lmsg.startswith("bd tell me"):
+            await SEND(ch, f"{random.choice(ANSWERS)}")
+            return
+
+        elif I_SPY['status'] != None and ch == I_SPY['channel']:
+            if lmsg == I_SPY['answers'][I_SPY['status']]: 
+                next = I_SPY['status'] + 1
+                
+                I_SPY['status'] = None
+                await SEND(ch,'Correct.')
+                await asyncio.sleep(5)
+                if I_SPY['questions'][next] != None:
+                    I_SPY['status'] = next
+                    await SEND(ch,I_SPY['questions'][next])
+                    await asyncio.sleep(I_SPY['maxwait'])
+                    if I_SPY['status'] == next:
+                        I_SPY['status'] = None
+                        await SEND(ch,'Whatever.')
+                else:
+                   await SEND(ch,'I hate my job.')
+            else:
+                I_SPY['status'] = None
+                await SEND(ch,'Wrong. Better luck next time.')
+
+        # elif lmsg.startswith("bd throw ")and lmsg.endswith(" egg"):
+        #     if not EVENTS["Easter"] and ch.id != 813882658156838923:
+        #         await SEND(ch, f"{usr.mention} threw the Sleazy Egg! ...But it fell on the ground and broke.")
+        #         return
+
+        #     isSpecificEgg = False
+        #     specificEgg = lmsg.replace("bd throw ", "").replace(" egg", "")
+
+        #     if specificEgg.lower() in RIG_LIST or specificEgg.title() in MAX_EGGS or specificEgg.lower() in ["full", "perfect", "mega secret"]:
+        #         isSpecificEgg = True
+
+        #     view = ButtonEgg_Throw(timeout=30)
+        #     view.thrower = usr.id
+        #     view.disabled = False
+        #     view.type = None
+
+        #     if SPECIAL_ROLES["Admin"][0] in usr.roles and not isSpecificEgg:
+        #         BUTTONS["easterStaffStatus"] = True
+        #         view.type = "Admin"
+        #     elif EXTRA_ROLES["murdurator"] in usr.roles and not isSpecificEgg:
+        #         BUTTONS["easterStaffStatus"] = True
+        #         view.type = "Murdurator"
+        #     elif EXTRA_ROLES["admin"] in usr.roles and not isSpecificEgg:
+        #         BUTTONS["easterStaffStatus"] = True
+        #         view.type = "Broken Drone"
+        #     else:
+        #         if ch.id != 750060041289072771 and ch.id != 813882658156838923:
+        #             await SEND(ch, "The Egg Launcher only works in <#750060041289072771>.")
+        #             return
+        #         elif BUTTONS["easterStatus"]:
+        #             await SEND(ch, "The Egg Launcher is charging. This stuff takes time.")
+        #             return
+                
+        #         BUTTONS["easterStatus"] = True
+
+        #         for role in reversed(usr.roles):
+        #             if role.name.lower() in RIG_LIST:
+        #                 view.type = role.name
+        #                 break
+
+        #         if isSpecificEgg:
+        #             if specificEgg.title() in MAX_EGGS and str(view.thrower) in list_decoded_entries(f"{MAX_EGGS[specificEgg.capitalize()]} Egg"):
+        #                 view.type = specificEgg.title()
+        #             elif specificEgg.title() in MAX_EGGS:
+        #                 await SEND(ch, "To launch that egg, you must first have the base one.")
+        #                 BUTTONS["easterStatus"] = False
+        #                 return
+
+        #             if (specificEgg.title() == "Full" and check_full_egg_conditions(usr)):
+        #                 view.type = specificEgg.title()
+        #             elif specificEgg.title() == "Full":
+        #                 await SEND(ch, "Aren't you full of yourself? Or perhaps not full enough.")
+        #                 BUTTONS["easterStatus"] = False
+        #                 return
+
+        #             if (specificEgg.title() == "Perfect" and check_perfect_egg_conditions(usr)):
+        #                 view.type = specificEgg.title()
+        #             elif specificEgg.title() == "Perfect":
+        #                 await SEND(ch, "Nobody is perfect, but you aren't even close.")
+        #                 BUTTONS["easterStatus"] = False
+        #                 return
+                    
+        #             if (specificEgg.title() == "Mega Secret" and (MEGA_SECRET_LAUNCHER["user"] == usr.id or MEGA_SECRET_LAUNCHER["user"] == None)):
+        #                 view.type = specificEgg.title()
+        #             elif specificEgg.title() == "Mega Secret":
+        #                 await SEND(ch, "You don't have it on you.")
+        #                 BUTTONS["easterStatus"] = False
+        #                 return
+                    
+        #     if random.randint(1, 11) == 1:
+        #         view.type = "Super Secret"
+
+        #     if view.type == None:
+        #         await SEND(ch, "The Egg Launcher is confused... It doesn't know which Egg to launch!")
+        #         BUTTONS["easterStatus"] = False
+        #         return
+            
+        #     if view.type == BUTTONS["easterLast"]:
+        #         await SEND(ch, "This egg launcher never launches the same egg twice!")
+        #         BUTTONS["easterStatus"] = False
+        #         return
+                    
+        #     BUTTONS["easterLast"] = view.type
+        #     view.picker = None
+        #     view.channel = ch
+        #     view.toolate = True
+            
+        #     try:
+        #         if view.type == "Super Secret":
+        #             view.message = await SEND_VIEW(ch, f"{usr.mention}'s Egg Launcher malfunctioned and threw a strange looking egg!'", view)
+        #         else:
+        #             view.message = await SEND_VIEW(ch, f"{usr.mention} threw the {view.type} egg!", view)
+        #     except Exception as e:
+        #         await SEND(ch, str(e))
+        #         BUTTONS["easterStatus"] = False
+        #         BUTTONS["easterStaffStatus"] = False
+        #         return
+
+        #     await view.wait()
+        #     await view.too_late()
+
+        #     if BUTTONS["easterStatus"] and not BUTTONS["easterStaffStatus"]:
+        #         await asyncio.sleep(BUTTONS["easterTimer"])
+        #         await SEND(ch, "The egg launcher is ready!")
+        #         BUTTONS["easterStatus"] = False
+
+        #     if BUTTONS["easterStaffStatus"]:
+        #         BUTTONS["easterStaffStatus"] = False
+
+        # elif lmsg.startswith("bd eat") and lmsg.endswith("egg") and EVENTS["Easter"]:
+        #     eggToEat = lmsg.replace("bd eat ", "").replace(" egg", "").capitalize()
+
+        #     if eggToEat.lower() not in EDIBLE_EGGS:
+        #         await SEND(ch, "You cannot eat this.")
+        #         return
+        #     elif not str(usr.id) in list_decoded_entries(f"{eggToEat} Egg"):
+        #         await SEND(ch, "You ate some air. Delicious!")
+        #         return
+        #     elif MORPHABLE_ROLES[eggToEat][0] in usr.roles:
+        #         await SEND(ch, "The egg said no.")
+        #         return
+        #     elif usr.id in EGG_EATER:
+        #         await SEND(ch, "Too many eggs are bad for your health.")
+        #         return
+            
+        #     if random.randint(1, 3) == 1:
+        #         await launch_egg(ch, "Secret", "Before you get the chance to eat the egg, it cracks and reveals... Another egg?")
+        #     else:
+        #         EGG_EATER.append(usr.id)
+
+        #         delete_entry_by_value(f"{eggToEat} Egg", str(usr.id))
+
+        #         role_list = []
+        #         for role in usr.roles:
+        #             if (role.name in MORPHABLE_ROLES):
+        #                 role_list.append(role)
+        #         await usr.remove_roles(*role_list)
+        #         await asyncio.sleep(1)
+
+        #         await ADD_ROLES(usr,MORPHABLE_ROLES[eggToEat][0])
+
+        #         await SEND(ch, f"{usr.mention} ate the {eggToEat} Egg! They feel different now.")
+
+        #         await asyncio.sleep(3600)
+        #         EGG_EATER.remove(usr.id)    
+
+        else:
+            # ## tips/tricks trigger
+            # if len(lsplit) == 2:
+            #     if lsplit[1] == "tip" or lsplit[1] == "trick":
+            #         if ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']:
+            #             await SEND(ch, "This command can be only used in <#750060041289072771>!")
+            #             return
+            #         if lsplit[0] in TIPS_KEYS:
+            #             await SEND(ch,show_next_entry(lsplit[0]))
+            #             return
+            #     elif lsplit[1] == "trivia":
+            #         if ch != CHANNELS['bot-commands'] and ch != CHANNELS['drone-masters']:
+            #             await SEND(ch, "This command can be only used in <#750060041289072771>!")
+            #             return
+            #         if lsplit[0] in TIPS_KEYS:
+            #             key = lsplit[0] + "T"
+            #             await SEND(ch,show_next_entry(key))
+            #             return
+
+            #single word trigger
+            for i, v in SINGLE_WORD_TRIGGERS.items():
+                if v in lmsg:
+                    if "{mention}" in i:
+                        i = i.format(mention=usr.mention)
+                    await SEND(ch,i)
+                    return
+        
+            #multiple word trigger
+            for i, v in MULTIPLE_WORD_TRIGGERS.items():
+                if all(word in lmsg for word in v):
+                    if "{mention}" in i:
+                        i = i.format(mention=usr.mention)
+                    await SEND(ch,i)
+                    return
+       
+            #mixed word trigger
+            for i, v in MIXED_WORD_TRIGGERS.items():
+                if v[0] in lmsg:
+                    if any(word in lmsg for word in v[1]):
+                        await SEND(ch,i)
+                        return
+
+            # sacrificed burger
+            # reaction triggers
+            for i, v in REACT_TRIGGERS.items():
+                 if v in lmsg:
+                    if v == 'hm' and len(lmsg) > 5:
+                        return
+                    await ADD_REACTION(message,i)
+            
+        if (ch.id == 624227331720085536 and buttons_chance == 1 and not BUTTONS["status"]) or (usr != None and EXTRA_ROLES["admin"] in usr.roles and lmsg.startswith("|buttons ")):
+            if EXTRA_ROLES["admin"] in usr.roles and lmsg.startswith("|buttons "):
+                BUTTONS["phase"] = int(msg.split(" ")[1])
+                BUTTONS["channel"] = CHANNELS[lmsg.split(" ")[2]]
+            else:
+                if EVENTS["Easter"]:
+                    BUTTONS["phase"] = 100
+                else:
+                    BUTTONS["phase"] = random.randint(1, 4)
+                    
+                BUTTONS["channel"] = CHANNELS["general"]
+
+            if BUTTONS["phase"] == 1:
+                BUTTONS["status"] = True
+                view = ButtonGames_FakeInteractionFailed(timeout=50)
+                view.users = {}
+                view.toolate = True
+                view.message = await SEND_VIEW(BUTTONS["channel"], "A button.", view)
+
+                await view.wait()
+                await view.too_late()
+                BUTTONS["status"] = False
+
+            elif BUTTONS["phase"] == 2:
+                BUTTONS["status"] = True
+                view = ButtonGames_SoManyButtons(timeout=50)
+                view.pressed = 0
+                view.toolate = True
+                view.correct_button = str(random.randint(1, 25))
+                view.message = await SEND_VIEW(BUTTONS["channel"], "So many buttons... which one to click?", view)
+
+                await view.wait()
+                await view.too_late()
+                BUTTONS["status"] = False
+
+            elif BUTTONS["phase"] == 3:
+                BUTTONS["status"] = True
+                view = ButtonGames_HelpBrokenDrone(timeout=60)
+                view.toolate = True
+                view.users = []
+                view.helpers = []
+                view.step = 0
+                view.roleowners = list_decoded_entries("Broken Drone Helper")
+                view.message = await SEND_VIEW(BUTTONS["channel"], "Could you help me activating these buttons?", view)
+
+                await view.wait()
+                await view.too_late()
+                BUTTONS["status"] = False
+
+            elif BUTTONS["phase"] == 4:
+                BUTTONS["status"] = True
+
+                # theObject = random.choice(list(OBJECTS.keys()))
+                # theChoices = list(OBJECTS[theObject])
+
+                view = ButtonGames_ThrowingStuff(timeout=120)
+                view.users = []
+                view.custom = False
+                view.closed = False
+
+                view.results = ""
+                view.votes = {
+                    "0": [],
+                    "1": [],
+                    "2": [],
+                    "3": [],
+                }
+
+                view.thrownObject = random.choice(list(OBJECTS.keys()))
+                view.choices = list(OBJECTS[view.thrownObject])
+
+                view.choice1 = view.choices[0]
+                view.choice2 = view.choices[1]
+                view.choice3 = view.choices[2]
+                view.choice4 = view.choices[3]
+
+                for i, choice_text in enumerate(view.choices):
+                    view.votes[str(i)] = []
+
+                    btn = discord.ui.Button(
+                        label=choice_text, 
+                        custom_id=f"throw{i}", 
+                        style=discord.ButtonStyle.primary
+                    )
+
+                    async def create_callback(index):
+                        async def callback(interaction: discord.Interaction):
+                            await view.process_click(interaction, str(index), interaction.user)
+                        return callback
+
+                    btn.callback = await create_callback(i)
+                    view.add_item(btn)
+
+                # Define the buttons without labels yet
+                # button1 = discord.ui.Button(label=view.choice1, custom_id="throw0", style=discord.ButtonStyle.primary)
+                # button2 = discord.ui.Button(label=view.choice2, custom_id="throw1", style=discord.ButtonStyle.primary)
+                # button3 = discord.ui.Button(label=view.choice3, custom_id="throw2", style=discord.ButtonStyle.primary)
+                # button4 = discord.ui.Button(label=view.choice4, custom_id="throw3", style=discord.ButtonStyle.primary)
+
+                # Add buttons to the view with their labels
+                # view.add_item(button1)
+                # view.add_item(button2)
+                # view.add_item(button3)
+                # view.add_item(button4)
+                BUTTONS["view"] = view
+
+                view.message = await SEND_VIEW(BUTTONS["channel"], f"Someone is throwing **{view.thrownObject}** in your way! How do you react?!", view)
+
+                await view.wait()
+                BUTTONS["status"] = False
+
+            elif BUTTONS["phase"] == 100:
+                await launch_egg(BUTTONS["channel"], "Architect", "The Architect Egg fell from the sky!")
+                # BUTTONS["status"] = True
+                # view = ButtonEgg_Throw(timeout=30)
+                # view.thrower = None
+                # view.picker = None
+                # view.disabled = False
+
+                # view.type = "Architect"
+
+                # view.channel = ch
+                # view.toolate = True
+                # view.message = await SEND_VIEW(BUTTONS["channel"], "The Architect Egg fell from the sky!", view)
+
+                # await view.wait()
+                # await view.too_late()
+                # BUTTONS["status"] = False
+
+            elif BUTTONS["phase"] == 101:
+                BUTTONS["status"] = True
+                view = ButtonEgg_Eggcelent(timeout=1000)
+
+                view.channel = ch
+                view.toolate = True
+                view.message = await SEND_VIEW(BUTTONS["channel"], "Thank you for helping me get the eggs — you have all been eggcellent! I have a little something, but do not tell Sleazel.", view)
+
+                await view.wait()
+                await view.too_late()
+                BUTTONS["status"] = False
+
+    ## admin commands
+    if EXTRA_ROLES['admin'] in usr.roles and msg.startswith("|"):
+        drone_master_ch = CHANNELS["drone-masters"]
+        msginputs = msg.split(" ")
+        msgsplit = msg.split(" ", 2) #creates a list from the input received. "Hello world say HI!" becomes LIST["Hello", "world", "say HI!"]
+        lmsgsplit = lmsg.split(" ", 2) #creates a list from the input received and makes it lowercase. "Hello world say HI!" becomes LIST["hello", "world", "say hi!"]
+
+        #-----admin commands that require ONE input-----
+        # if len(msginputs) == 1:            
+            #resets the rig tracker message  ---why would you do this? ç__ç
+            # if lmsg.startswith("resetcounter", 1):
+            #     await EDIT_MESSAGE(RIG_DATA['rigTracker'], "**RIGS TRACKER**,\nPATRON: 0,\nJOKER: 0,\nWICKED: 0,\nKEEPER: 0,\nHACKER: 0,\nTHIEF: 0,\nSPECTRE: 0,\nARCHON: 0,\nDRIFTER: 0,\nHERETIC: 0,\nCHAMELEON: 0")
+            #     return
+            
+            # how many wisdoms are there - i swear to god bro why is this not working
+            # if lmsg.startswith("wisdoms", 1):
+            #     await SEND(ch, f"I have {len(WISDOM)} wisdoms.")
+            #     return
+            
+            # if lmsg.startswith("adduserids", 1):
+            #     try:
+            #         await SEND(ch, "Adding each id in its role list...")
+            #         for mem in SERVER_DATA['server'].members:
+            #             for role in mem.roles:
+            #                 if role.name in FUN_LISTS.keys():
+            #                     FUN_LISTS[role.name].append(mem.id)
+
+            #         await asyncio.sleep(2)
+            #         await SEND(ch, "Starting to add each user id in the db...")
+            #         await asyncio.sleep(2)
+
+            #         for funrole in FUN_LISTS.keys():
+            #             for id in FUN_LISTS[funrole]:
+            #                 add_entry(funrole, id)
+            #                 await asyncio.sleep(3)
+
+            #             await SEND(ch, f"Owners of {funrole} have been added...")
+            #             await asyncio.sleep(2)
+
+            #         await SEND(ch, "I'm done here.")
+                        
+            #     except Exception as e:
+            #         await SEND(ch, e)
+
+            #     return
+
+        #-----admin commands that require TWO inputs-----
+        if len(msginputs) == 2 or lmsg.startswith("nr", 1):
+            secondVal = msg.split(" ", 1)[1]
+            second = secondVal.replace("_", " ")          # NOT lowercase
+            lsecond = secondVal.lower().replace("_", " ") # YES lowercase
+            #ispy command
+            # if lmsg.startswith("ispy",1):
+            #     I_SPY['channel'] = CHANNELS[lsecond]
+            #     I_SPY['status'] = 0
+            #     await SEND(I_SPY['channel'], I_SPY['questions'][0])
+            #     await DELETE(message)
+            #     await asyncio.sleep(I_SPY['maxwait'])
+            #     if I_SPY['status'] == 0:
+            #         I_SPY['status'] = None
+            #         await SEND(I_SPY['channel'],'Whatever.')
+            #     return
+            
+            # does this key exist in db and whats the value 
+            # if lmsg.startswith("key", 1):
+            #     key_cap = lsecond.title()
+            #     key_low = lsecond.lower()
+                
+            #     responses = []
+
+            #     for k in [key_cap, key_low, secondVal]:
+            #         if check_key(k):
+            #             value = list_decoded_entries(k)
+
+            #             if not value:
+            #                 value = get_value(k)
+                        
+            #             responses.append(f"Key `{k}` found! Value: {value}")
+
+            #     if responses:
+            #         await SEND(ch, "\n".join(responses))
+            #     else:
+            #         await SEND(ch, f"No key found for '{key_cap}' or '{key_low}'.")
+                
+            #     return 
+            
+            # remove key from db
+            # if lmsg.startswith("dkey", 1):
+            #     try:
+            #         delete_key(secondVal)
+            #         await SEND(ch, f"Key '{secondVal}' deleted successfully.")
+            #     except Exception as e:
+            #         await SEND(ch, e)
+                
+            #     return
+
+            #create a new role with name
+            # if lmsg.startswith("nr", 1):
+            #     try:
+            #         add_entry(second, "dummy")
+            #     except Exception as e:
+            #         await SEND(ch, e)
+            #         return
+
+            #     await SEND(ch, "Role created successfully.")
+            #     return
+            
+            #blacklist someone from using bot commands
+            # if lmsg.startswith("blacklist", 1):
+            #     try:
+            #         BOT_BLACKLIST.append(str(second))
+            #     except Exception as e:
+            #         await SEND(ch, e)
+            #         return
+
+            #     await SEND(ch, "Blacklisted.")
+            #     return
+            
+            # #whitelist someone from using bot commands
+            # if lmsg.startswith("whitelist", 1):
+            #     try:
+            #         BOT_BLACKLIST.remove(second)
+            #     except Exception as e:
+            #         await SEND(ch, e)
+            #         return
+
+            #     await SEND(ch, "Whitelisted.")
+            #     return
+        
+        #-----admin commands that require THREE or MORE inputs-----
+        elif len(msginputs) >= 3:
+            third = msg.split(" ", 2)[2]          #NOT lowecase
+            lthird = msg.split(" ", 2)[2].lower() #YES lowecase
+
+            ##-----COMMANDS THAT ONLY USE 3 INPUTS-----
+            #prepare architect
+            # if lmsg.startswith("architect", 1) and EVENTS["Easter"]:
+            #     try:
+            #         arcMsg = await SEND(CHANNELS[lmsgsplit[1]], f"The Architect Egg is falling at terminal velocity in this channel! Take cover <t:{round(time.time() + int(third))}:R>.")
+            #         await asyncio.sleep(int(third))
+
+            #         view = ButtonEgg_Throw(timeout=30)
+            #         view.thrower = None
+            #         view.disabled = False
+
+            #         view.type = "Architect"
+
+            #         view.channel = CHANNELS[lmsgsplit[1]]
+            #         view.toolate = True
+            #         view.message = await SEND_VIEW(CHANNELS[lmsgsplit[1]], "The Architect Egg fell from the sky!", view)
+            #         await asyncio.sleep(1)
+            #         await EDIT_MESSAGE(arcMsg, "The Architect Egg landed gracefully.")
+
+            #         await view.wait()
+            #         await view.too_late()
+
+            #         return
+            #     except:
+            #         await SEND(CHANNELS['drone-masters'], "Architen't.")
+            #         return
+                
+            #have the bot say whatever you say
+            # if lmsg.startswith("makesay", 1):
+            #     try:
+            #         await SEND(CHANNELS[lmsgsplit[1]], third)
+            #         await DELETE(message)
+            #         return
+            #     except:
+            #         await SEND(CHANNELS['drone-masters'], "I refuse.")
+            #         return
+    
+            #give ckr
+            # if lmsg.startswith("ckr to", 1):
+            #     for mem in SERVER_DATA['server'].members:
+            #         if mem.name.lower() == lthird:
+            #             await SEND(ch, "I gave the Chat Killer role to " + mem.name)
+            #             await asyncio.sleep(1)
+            #             await ADD_ROLES(mem, EXTRA_ROLES['ckr'])
+            #             break
+            #     return  
+                
+            #remove ckr
+            # if lmsg.startswith("ckr from", 1):
+            #     for mem in SERVER_DATA['server'].members:
+            #         if mem.name.lower() == lthird:
+            #             await SEND(ch, "I took the Chat Killer Role away from " + mem.name)
+            #             await asyncio.sleep(1)
+            #             await REMOVE_ROLES(mem, EXTRA_ROLES['ckr'])
+            #             break
+            #     return   
+
+            #give any role
+            # if lmsg.startswith("assign", 1):
+            #     try:
+            #         if not any(third in roles if isinstance(roles, list) else third in roles.keys() for roles in FUN_ROLES.values()):
+            #             await SEND(ch, "You cannot assign this role through my commands.")
+            #             return
+
+            #         for mem in SERVER_DATA['server'].members:
+            #             if int(mem.id) == int(msgsplit[1]):
+            #                 if msgsplit[1] in list_decoded_entries(third):
+            #                     await asyncio.sleep(1)
+            #                     await SEND(ch, "They already own this role, duh.")
+            #                     return
+
+            #                 if third in FUN_ROLES["Easter"]:
+            #                     await add_egg_with_check(third, mem)
+            #                 else:
+            #                     add_entry(third, msgsplit[1])
+
+            #                 await asyncio.sleep(1)
+            #                 await SEND(ch, "I gave the role to " + mem.name)
+            #                 break
+            #     except Exception as e:
+            #         await SEND(ch, e)
+
+            #     return  
+
+            # #remove any role
+            # if lmsg.startswith("unassign", 1):
+            #     try:
+            #         if not any(third in roles if isinstance(roles, list) else third in roles.keys() for roles in FUN_ROLES.values()):
+            #             await SEND(ch, "You cannot assign this role through my commands.")
+            #             return
+
+            #         for mem in SERVER_DATA['server'].members:
+            #             if int(mem.id) == int(msgsplit[1]):
+            #                 entries = list_decoded_entries(third)
+
+            #                 if not msgsplit[1] in entries:
+            #                     await asyncio.sleep(1)
+            #                     await SEND(ch, "They do not own the role. Are you ok?")
+            #                     return
+
+            #                 index = entries.index(msgsplit[1])
+            #                 delete_entry(third, index)
+
+            #                 await asyncio.sleep(1)
+            #                 await SEND(ch, "Took the role away from " + mem.name)
+            #                 break
+            #     except Exception as e:
+            #         await SEND(ch, e)
+            #     return  
+
+            #purge any role
+            # if lmsg.startswith("purge role", 1):
+            #     try:
+            #         if not any(third in roles if isinstance(roles, list) else third in roles.keys() for roles in FUN_ROLES.values()):
+            #             await SEND(ch, "You cannot purge this role through my commands.")
+            #             return
+                        
+            #         delete_key(third)
+            #         await asyncio.sleep(1)
+            #         await SEND(ch, "The role is gone.")
+            #     except Exception as e:
+            #         await SEND(ch, e)
+            #     return 
+            
+            #purge any role
+            # if lmsg.startswith("purge drole", 1):
+            #     if third in APPROVED_ROLES:
+            #         neededrole = APPROVED_ROLES[third]
+            #     else:
+            #         await SEND(ch, "You cannot obliterate this role through my commands.")
+            #         return
+                    
+            #     await PURGE_ROLES(neededrole)
+            #     await asyncio.sleep(1)
+            #     await SEND(ch, "The Discord role is gone.")
+            #     return  
+            
+            #create a new role with name and color 
+            if lmsg.startswith("ndr", 1):
+                try:
+                    newrole = await NEW_ROLE(SERVER_DATA['server'], lmsgsplit[1], third)
+                except Exception as e:
+                    await SEND(ch, e)
+                    return
+
+                await SEND(ch, "Discord role created successfully.")
+
+                APPROVED_ROLES[third] = newrole
+                return
+            
+            # #give any role
+            # if lmsg.startswith("dassign", 1):
+            #     try:
+            #         if third in APPROVED_ROLES:
+            #             neededrole = APPROVED_ROLES[third]
+            #         else:
+            #             await SEND(ch, "You cannot assign this role through my commands.")
+            #             return
+                        
+            #         for mem in SERVER_DATA['server'].members:
+            #             if int(mem.id) == int(msgsplit[1]):
+            #                 await SEND(ch, "I gave the role to " + mem.name)
+            #                 await asyncio.sleep(1)
+            #                 await ADD_ROLES(mem, neededrole)
+            #                 break
+            #     except Exception as e:
+            #         print(e)
+            #         await SEND(ch, e)
+
+            #     return  
+
+            # #remove any role
+            # if lmsg.startswith("dunassign", 1):
+            #     if third in APPROVED_ROLES:
+            #         neededrole = APPROVED_ROLES[third]
+            #     else:
+            #         await SEND(ch, "You cannot unassign this role through my commands.")
+            #         return
+
+            #     for mem in SERVER_DATA['server'].members:
+            #         if int(mem.id) == int(msgsplit[1]):
+            #             await SEND(ch, "Took the role away from " + mem.name)
+            #             await asyncio.sleep(1)
+            #             await REMOVE_ROLES(mem, neededrole)
+            #             break
+            #     return  
+            
+            # #creates new emoji
+            # if lmsg.startswith("ne", 1):
+            #     try:
+            #         url = msgsplit[1]
+            #         name = third
+                    
+            #         # Download the image data
+            #         response = requests.get(url)
+            #         if response.status_code == 200:
+            #             image_data = response.content
+            #             emoji = await message.guild.create_custom_emoji(name=name, image=image_data)
+            #             await message.channel.send(f"Emoji {emoji.name} has been added!")
+            #         else:
+            #             await message.channel.send("Could not download image.")
+                        
+            #     except Exception as e:
+            #         await message.channel.send(f"Error creating emoji: {str(e)}")
+
+            # #-----COMMANDS THAT ONLY USE 4 INPUTS-----
+            # #edits db rig tracking count for specific alignment
+            # if lmsg.startswith("edit tracker", 1):
+            #     db.set(lthird + "uses", msg.split(" ", 3)[3])  #edit tracker patron 2 
+            #     return
+            
+            #-----COMMANDS THAT ONLY USE EVEN MORE INPUTS-----
+            #empty so far-
+
+        #length may vary... for this one
+        #quiz
+        # if lmsg.startswith("quiz", 1):
+        #     if lmsgsplit[1] == "new":
+        #         qSplit = msgsplit[2].split("|")
+        #         if len(qSplit) != 7:
+        #             await SEND(ch,"Question does not have the required 7 sections.")
+        #         else:
+        #             add_entry("quiz", msgsplit[2])
+        #             await SEND(ch, "Successfully added new quiz question")
+
+        #     elif lmsgsplit[1] == "amount":
+        #         await SEND(ch,"There are " + str(get_amount_of_entries("quiz")) + " questions in the database.")        
+
+        #     elif lmsgsplit[1] == "print":
+        #         question = show_specific_entry("quiz",int(msgsplit[2]))
+        #         qSplit = question.split("|")
+        #         toSend = "Q:\n" + qSplit[0] + "\nCorrect Answer:\n" + qSplit[1]
+        #         toSend += "\nA2:\n" + qSplit[2] + "\nA3:\n" + qSplit[3] + "\nA4:\n" + qSplit[4]
+        #         toSend += "\nGood response:\n" + qSplit[5] + "\nBad response:\n" + qSplit[6]
+        #         await SEND(ch,toSend)
+        #     elif lmsgsplit[1] == 'list':
+        #         await PRINT_QUESTIONS(ch)
+        #     elif lmsgsplit[1] == "delete":
+        #         delete_entry("quiz", int(msgsplit[2]))
+        #         await SEND(ch,"Question at index " + msgsplit[2] + " has been deleted." )
+
+        #     return
+
+        #and if none of the others match go here...
+        if lmsg.startswith("triv", 2) or lmsg.startswith("tip", 2):
+            key = msgsplit[1]
+            if not key in TIPS_KEYS:
+                await SEND(ch,"Invalid alignment.")
+                return
+            
+            #tip or trivia?
+            tot = "tip"
+            if msg.startswith("triv",2):
+                tot = "triv"
+                #for trivia, key has extra "T" at the end
+                key = key + "T"
+            elif not msg.startswith("tip",2):
+                await SEND(ch,"Invalid command.")
+                return
+            
+            #add tip   
+            if msg.startswith("n",1):
+                add_entry(key,msgsplit[2])
+                await SEND(ch,"New " + msgsplit[1] + " " + tot + " added.")
+                return
+
+            #list tips
+            if msg.startswith("l",1):
+                await SEND(ch,msgsplit[1] + " " + tot + "(s):")
+                await print_entries(ch, key)
+                return
+                
+            #delete tip
+            if msg.startswith("d",1):
+                delete_entry(key,int(msgsplit[2]))
+                await SEND(ch,msgsplit[1] + " " + tot + "(s):")
+                await print_entries(ch, key)
+                #hmmmm
+                return
+            
+            #copy tip to thread
+            if msg.startswith("c",1):
+                #print(msgsplit[2])
+                #newSplit = msg.split(' ',3)
+                #channel = client.get_channel(int(newSplit[2]))
+                thread = client.get_channel(int(msgsplit[2]))
+                await SEND(ch,'copying...')
+                await POST_TIPS(thread,key)
+                return
+
+### RUN THE BOT ###
+client.run(os.environ['TOKEN'])

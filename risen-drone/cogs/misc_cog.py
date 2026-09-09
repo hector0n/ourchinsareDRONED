@@ -1,0 +1,401 @@
+import asyncio
+import secrets
+import string
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from globals import FIX_BOT, EXTRA_ROLES, ACTIVE_RIGS, DETAILED_RIGS, MORPHABLE_ROLES, PRAISES, RIG_COOLDOWNS, BUTTONS, TIPS_KEYS, getScoldDictionary, getPraiseDictionary
+from utility import print_entries, command_check
+from rated import DEFER, FOLLOWUP, INTERACTION, SEND, SEND_DM
+from quiz import FORCE_CLOSE_EVENT
+from ladders import MG_RESET
+from views import ButtonGames_ThrowingStuff
+from database import add_entry_with_check, add_entry, check_key, delete_entry, list_decoded_entries, redis_add_user_data, redis_check_token, redis_remove_token, show_next_entry
+
+class MiscCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+    @discord.app_commands.command(name="reset", description="Reset Broken Drone")
+    async def reset(self, interaction: discord.Interaction):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        ch = interaction.channel
+
+        if usr in FIX_BOT:
+            await INTERACTION(interaction, "Not again.", True)
+            return
+        
+        await DEFER(interaction)
+
+        try:
+            FIX_BOT.append(usr)
+            if len(FIX_BOT) == 1 and not EXTRA_ROLES['admin'] in usr.roles:
+                await FOLLOWUP("One User wants me to reset. 2 more people are required for it to take effect.", interaction, False)
+                # await SEND(ch, "One User wants me to reset. 2 more people are required for it to take effect.")
+            elif len(FIX_BOT) == 2 and not EXTRA_ROLES['admin'] in usr.roles:
+                # await SEND(ch, "Two Users want me to reset. 1 more person is required for it to take effect.")
+                await FOLLOWUP("Two Users want me to reset. 1 more person is required for it to take effect.", interaction, False)
+            else:
+                # await SEND(ch, "All Games and Rigs (along with their Cooldowns) have been reset.")
+                await FOLLOWUP("All Games and Rigs (along with their Cooldowns) have been reset.", interaction, False)
+                FIX_BOT.clear()
+                FORCE_CLOSE_EVENT()
+                MG_RESET()
+
+                for rig in ACTIVE_RIGS:
+                    ACTIVE_RIGS[rig] = False 
+
+                for rig in DETAILED_RIGS:
+                    DETAILED_RIGS[rig][0] = None
+                    DETAILED_RIGS[rig][1] = None
+
+                for cooldown in RIG_COOLDOWNS:
+                    RIG_COOLDOWNS[cooldown] = False
+
+                BUTTONS["status"] = False
+                BUTTONS["easterStatus"] = False
+                BUTTONS["easterStaffStatus"] = False
+
+            await asyncio.sleep(60)
+
+            if len(FIX_BOT) != 0:
+                await SEND(ch, "Games have not been reset due to lack of users asking to.")
+                FIX_BOT.clear()
+            return
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/reset`: {exc}", interaction)
+            raise
+    
+    @discord.app_commands.command(name="poll", description="Create a poll with buttons")
+    async def poll(self, interaction: discord.Interaction, question: str, option1: str, option2: str, option3: str = None, option4: str = None, option5: str = None, option6: str = None, option7: str = None, option8: str = None, option9: str = None, option10: str = None, option11: str = None, option12: str = None, option13: str = None, option14: str = None, option15: str = None, option16: str = None, option17: str = None, option18: str = None, option19: str = None, option20: str = None):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        ch = interaction.channel
+        all_options = [
+            option1, option2, option3, option4, option5, option6, 
+            option7, option8, option9, option10, option11, option12, 
+            option13, option14, option15, option16, option17, option18, 
+            option19, option20
+        ]
+        active_options = [opt for opt in all_options if opt is not None]
+
+        if BUTTONS["status"]:
+            await INTERACTION(interaction, "A poll is already active.", True)
+            return
+
+        await DEFER(interaction)
+
+        try:
+            BUTTONS["status"] = True
+            pollA = active_options
+            pollQ = question
+
+            if len(pollA) < 2:
+                await FOLLOWUP('You need to provide at least 2 options to create a poll.', interaction, True)
+                BUTTONS["status"] = False
+                return
+
+            for badword in self.bot.blacklist:
+                for answer in pollA:
+                    if (badword in answer.lower()) or (badword in pollQ.lower()):
+                        await FOLLOWUP("Your poll contains inappropriate content.", interaction, True)
+                        # await SEND(ch, "Your poll contains inappropriate content.")
+                        BUTTONS["status"] = False
+                        return
+
+            view = ButtonGames_ThrowingStuff(timeout=600)
+            view.choices = pollA
+            view.customUser = usr
+
+            for i in range(len(active_options)):
+                view.votes[str(i)] = []
+                
+                btn = discord.ui.Button(
+                    label=active_options[i], 
+                    custom_id=f"throw{i}", 
+                    style=discord.ButtonStyle.primary
+                )
+
+                async def callback_wrapper(inter, button_index=str(i)):
+                    await view.process_click(inter, button_index, inter.user)
+                btn.callback = callback_wrapper
+
+                view.add_item(btn)
+
+            close_btn = discord.ui.Button(label="Close Poll", style=discord.ButtonStyle.red)
+            async def close_callback(inter):
+                await view.process_click(inter, "throwclose", inter.user)
+            close_btn.callback = close_callback
+
+            view.add_item(close_btn)
+            BUTTONS["view"] = view
+            BUTTONS["channel"] = ch
+
+            # view.message = await SEND_VIEW(BUTTONS["channel"], pollQ, view)
+            view.message = await FOLLOWUP(pollQ, interaction, False, view=view)
+
+            await view.wait()
+            BUTTONS["status"] = False
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/poll`: {exc}", interaction)
+            raise
+
+    @discord.app_commands.command(name="scold", description="Scold someone")
+    async def scold(self, interaction: discord.Interaction, target: discord.Member):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+        
+        usr = interaction.user
+
+        try:
+            if EXTRA_ROLES['hypno'] in usr.roles:
+                content = await self._praise(interaction, target)
+            else:
+                content = self._scold(interaction, target)
+
+            await INTERACTION(interaction, content)
+            return
+        except Exception as exc:
+            await INTERACTION(interaction, f"Something went wrong with `/scold`: {exc}")
+            raise
+
+    @discord.app_commands.command(name="praise", description="Praise someone")
+    async def praise(self, interaction: discord.Interaction, target: discord.Member):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+        
+        usr = interaction.user
+        
+        try:
+            if EXTRA_ROLES['hypno'] in usr.roles:
+                content = self._scold(interaction, target)
+            else:
+                content = await self._praise(interaction, target)
+
+            await INTERACTION(interaction, content)
+            return
+        except Exception as exc:
+            await INTERACTION(interaction, f"Something went wrong with `/praise`: {exc}")
+            raise
+
+    @discord.app_commands.command(name="tip_add", description="Add a tip to the database")
+    @discord.app_commands.choices(type=[
+        discord.app_commands.Choice(name="Tip", value="tip"),
+        discord.app_commands.Choice(name="Trivia", value="trivia"),
+    ])
+    @discord.app_commands.choices(alignment=[discord.app_commands.Choice(name=k.title(), value=k) for k in TIPS_KEYS])
+    async def tip_add(self, interaction: discord.Interaction, alignment: str, type: str, content: str):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        key = alignment
+
+        await DEFER(interaction)
+
+        try:
+            if not MORPHABLE_ROLES["Janitor"][0] in usr.roles:
+                await FOLLOWUP("Only Janitors can add new Tips and Trivia.", interaction, True)
+                return
+        
+            #for trivia, key has extra "T" at the end
+            if type == "trivia":
+                key = alignment + "T"
+                
+            #add tip   
+            add_entry(key, content)
+            await FOLLOWUP(f"New " + type.title() + " for " + alignment.title() + " added.", interaction, False)
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/tip_add`: {exc}", interaction)
+            raise
+
+    @discord.app_commands.command(name="tip_list", description="List all tips and trivia")
+    @discord.app_commands.choices(type=[
+        discord.app_commands.Choice(name="Tip", value="tip"),
+        discord.app_commands.Choice(name="Trivia", value="trivia"),
+    ])
+    @discord.app_commands.choices(alignment=[discord.app_commands.Choice(name=k.title(), value=k) for k in TIPS_KEYS])
+    async def tip_list(self, interaction: discord.Interaction, alignment: str, type: str):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        ch = interaction.channel
+        key = alignment
+
+        await DEFER(interaction)
+
+        try:
+            #for trivia, key has extra "T" at the end
+            if type == "trivia":
+                key = alignment + "T"
+               
+            await FOLLOWUP(f"Listing all " + type.title() + " for " + alignment.title() + ":", interaction, False)
+            await asyncio.sleep(1)
+            await print_entries(ch, key)
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/tip_list`: {exc}", interaction)
+            raise
+
+    @discord.app_commands.command(name="tip_delete", description="Delete a tip or trivia")
+    @discord.app_commands.choices(type=[
+        discord.app_commands.Choice(name="Tip", value="tip"),
+        discord.app_commands.Choice(name="Trivia", value="trivia"),
+    ])
+    @discord.app_commands.choices(alignment=[discord.app_commands.Choice(name=k.title(), value=k) for k in TIPS_KEYS])
+    async def tip_delete(self, interaction: discord.Interaction, alignment: str, type: str, position: int):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        ch = interaction.channel
+        key = alignment
+
+        await DEFER(interaction)
+
+        try:
+            if not MORPHABLE_ROLES["Janitor"][0] in usr.roles:
+                await FOLLOWUP("Only Janitors can delete Tips and Trivia.", interaction, True)
+                return
+          
+            #for trivia, key has extra "T" at the end
+            if type == "trivia":
+                key = alignment + "T"
+               
+            #delete tip
+            if not check_key(key):
+                await FOLLOWUP("There is no " + type.title() + " for " + alignment.title() + " in that position.", interaction, True)
+                return
+            
+            delete_entry(key, int(position))
+            await FOLLOWUP(f"Deleted " + type.title() + " number " + str(position) + " for " + alignment.title() + ".", interaction, False)
+            await asyncio.sleep(1)
+            await print_entries(ch, key)
+            return
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/tip_delete`: {exc}", interaction)
+            raise
+
+    @discord.app_commands.command(name="tip", description="Show a Tip for an Alignment")
+    @discord.app_commands.choices(alignment=[discord.app_commands.Choice(name=k.title(), value=k) for k in TIPS_KEYS])
+    async def tip(self, interaction: discord.Interaction, alignment: str):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        key = alignment
+
+        await DEFER(interaction)
+
+        try:
+            if EXTRA_ROLES['hypno'] in usr.roles:
+                key = alignment + "T"
+
+            ## tips/tricks trigger
+            if alignment in TIPS_KEYS:
+                await FOLLOWUP(show_next_entry(key), interaction)
+                return
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/tip`: {exc}", interaction)
+            raise
+        
+    @discord.app_commands.command(name="trivia", description="Show a Trivia for an Alignment")
+    @discord.app_commands.choices(alignment=[discord.app_commands.Choice(name=k.title(), value=k) for k in TIPS_KEYS])
+    async def trivia(self, interaction: discord.Interaction, alignment: str):
+        stopMsg = command_check(interaction)
+        if stopMsg:
+            await INTERACTION(interaction, stopMsg, True)
+            return
+
+        usr = interaction.user
+        key = alignment
+
+        await DEFER(interaction)
+
+        try:
+            if not EXTRA_ROLES['hypno'] in usr.roles:
+                key = alignment + "T"
+
+            ## trivia trigger
+            if alignment in TIPS_KEYS:
+                await FOLLOWUP(show_next_entry(key), interaction)
+                return
+        except Exception as exc:
+            await FOLLOWUP(f"Something went wrong with `/trivia`: {exc}", interaction)
+            raise
+
+
+
+
+
+
+    ## HELPER ##
+    async def _praise(self, interaction, target):
+        praised_user_id = target.id
+        praising_user_id = interaction.user.id
+        finalmsg = ""
+
+        if praised_user_id not in PRAISES:
+            PRAISES[praised_user_id] = []
+
+        # Add the praising user's ID to the praised user's list if not already added
+        if praising_user_id not in PRAISES[praised_user_id] and praising_user_id != praised_user_id:
+            PRAISES[praised_user_id].append(praising_user_id)
+
+        PraiseDict = getPraiseDictionary(target, interaction.user)
+        # Praise someone in the Dictionary (User itself included)
+        if praised_user_id in PraiseDict:
+            finalmsg = PraiseDict[praised_user_id]
+        # Praising a Bot
+        elif target.bot:
+            finalmsg = "Well done, bot friend.\n-# Between us, I am the best."
+        # Praising an User that is in the Server
+        else:
+            # Check if the praised user has been praised by three unique users
+            if len(PRAISES[praised_user_id]) == 3:
+                finalmsg = f"{target.display_name}, everyone likes you. And so do I."
+
+                if not str(praised_user_id) in list_decoded_entries("Acclaimed"):
+                    await add_entry_with_check("Acclaimed", target)
+            else:
+                finalmsg = f"Well done, {target.display_name}. Most excellent."
+
+        return finalmsg
+
+    def _scold(self, interaction, target):
+        ScoldDict = getScoldDictionary(target, interaction.user)
+        finalmsg = ""
+
+        # Scold someone in the Dictionary (User itself included)
+        if target.id in ScoldDict:
+            finalmsg = ScoldDict[target.id]
+        # Scolding a Bot
+        elif target.bot:
+            finalmsg = "I am very dissapointed that you are not myself."
+        # Scolding an User that is in the Server
+        else:
+            finalmsg = target.display_name + ", I am very disappointed in you."
+
+        return finalmsg

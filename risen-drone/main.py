@@ -2191,3 +2191,5 @@ async def on_message(message):
 
 ### RUN THE BOT ###
 client.run(os.environ['TOKEN'])
+TOKEN = os.environ['discordkey']
+bot.run(TOKEN)
